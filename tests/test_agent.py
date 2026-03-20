@@ -1,0 +1,71 @@
+import torch
+from active_inference.config import Config
+from active_inference.agent import DeepAIFAgent
+
+
+def _debug_cfg():
+    return Config.from_yaml("configs/experiment/debug.yaml")
+
+
+def test_forward_pass():
+    agent = DeepAIFAgent(_debug_cfg())
+    agent.reset()
+    img = torch.randn(3, 64, 64)
+    state = torch.randn(2)
+    action = agent.step(img, state)
+    assert action.shape == (2,)
+
+
+def test_action_range():
+    agent = DeepAIFAgent(_debug_cfg())
+    agent.reset()
+    action = agent.step(torch.randn(3, 64, 64), torch.randn(2))
+    assert (action >= -1.0).all() and (action <= 1.0).all()
+
+
+def test_checkpoint_roundtrip(tmp_path):
+    torch.manual_seed(42)
+    cfg = _debug_cfg()
+    agent = DeepAIFAgent(cfg)
+    agent.reset()
+    img = torch.randn(3, 64, 64)
+    st = torch.randn(2)
+
+    path = str(tmp_path / "ckpt.pt")
+    agent.save_checkpoint(path)
+
+    agent2 = DeepAIFAgent(cfg)
+    agent2.load_checkpoint(path)
+
+    p1 = dict(agent.world_model.named_parameters())
+    p2 = dict(agent2.world_model.named_parameters())
+    for k in p1:
+        assert torch.allclose(p1[k], p2[k]), f"Mismatch at {k}"
+
+
+def test_update_reduces_loss():
+    torch.manual_seed(0)
+    cfg = _debug_cfg()
+    agent = DeepAIFAgent(cfg)
+    B, T = 2, cfg.training.seq_len
+    images = torch.randn(B, T, 3, 64, 64)
+    states = torch.randn(B, T, 2)
+    actions = torch.randn(B, T, 2).clamp(-1, 1)
+
+    info1 = agent.update(images, states, actions)
+    for _ in range(4):
+        info2 = agent.update(images, states, actions)
+    assert info2["total_loss"] < info1["total_loss"]
+
+
+def test_action_to_carla():
+    action = torch.tensor([0.5, 0.7])
+    s, t, b = DeepAIFAgent.action_to_carla(action)
+    assert abs(s - 0.5) < 1e-5
+    assert abs(t - 0.7) < 1e-5
+    assert abs(b - 0.0) < 1e-5
+
+    action_neg = torch.tensor([-0.3, -0.4])
+    s, t, b = DeepAIFAgent.action_to_carla(action_neg)
+    assert abs(t - 0.0) < 1e-5
+    assert abs(b - 0.4) < 1e-5

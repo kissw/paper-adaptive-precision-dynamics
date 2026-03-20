@@ -1,0 +1,65 @@
+import torch
+from torch import Tensor
+from torch.distributions import Normal
+
+from active_inference.models.ensemble import EnsembleTransitionHeads
+from active_inference.training.preference import PreferenceModel
+
+
+class EFEScorer:
+    def __init__(
+        self,
+        beta_instrumental: float = 1.0,
+        beta_epistemic: float = 0.1,
+        mc_samples: int = 32,
+    ):
+        self._beta_i = beta_instrumental
+        self._beta_e = beta_epistemic
+        self._mc_samples = mc_samples
+
+    def instrumental_value(
+        self, q_mean: Tensor, q_std: Tensor, pref_model: PreferenceModel
+    ) -> Tensor:
+        # Cross-entropy E_q[-log p_pref(z)], normalized by latent dim.
+        # Using cross-entropy instead of full KL because the entropy term
+        # H(q) is approximately constant w.r.t. action selection, and full
+        # KL in high-dim spaces produces values too large for CEM to
+        # differentiate action sequences.
+        # q_mean, q_std: [B, D]
+        latent_dim = q_mean.shape[-1]
+        q = Normal(q_mean, q_std)
+        z = q.rsample((self._mc_samples,))  # [S, B, D]
+        log_p = pref_model.log_prob(z)  # [S, B]
+        # Negative cross-entropy, normalized per dimension
+        return -log_p.mean(0) / latent_dim  # [B]
+
+    def epistemic_value_ensemble(self, ensemble: EnsembleTransitionHeads, feat: Tensor) -> Tensor:
+        return ensemble.epistemic_uncertainty(feat)  # [B]
+
+    def epistemic_value_decoder(
+        self, decoder, z_mean: Tensor, z_std: Tensor, n_samples: int = 10
+    ) -> Tensor:
+        # Decoder variance via MC sampling
+        q = Normal(z_mean, z_std)
+        samples = q.rsample((n_samples,))  # [S, B, D]
+        decoded = torch.stack([decoder(s) for s in samples])  # [S, B, C, H, W]
+        return decoded.var(dim=0).sum(dim=(1, 2, 3))  # [B]
+
+    def score(
+        self,
+        trajectory_feats: list[Tensor],
+        trajectory_means: list[Tensor],
+        trajectory_stds: list[Tensor],
+        pref_model: PreferenceModel,
+        ensemble: EnsembleTransitionHeads,
+    ) -> Tensor:
+        # trajectory_feats: list of [B, feat_dim], len=horizon
+        # trajectory_means: list of [B, stoch_dim]
+        # trajectory_stds: list of [B, stoch_dim]
+        # Returns: [B] total EFE (lower = better)
+        total = torch.zeros(trajectory_feats[0].shape[0], device=trajectory_feats[0].device)
+        for feat, mean, std in zip(trajectory_feats, trajectory_means, trajectory_stds):
+            instr = self.instrumental_value(mean, std, pref_model)
+            epist = self.epistemic_value_ensemble(ensemble, feat)
+            total = total + self._beta_i * instr - self._beta_e * epist
+        return total

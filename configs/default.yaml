@@ -1,0 +1,71 @@
+seed: 42
+device: cuda
+
+rssm:
+  deter_dim: 256
+  stoch_dim: 64
+  embed_dim: 256
+  min_std: 0.1
+  logvar_clip_low: -20
+  logvar_clip_high: 2
+
+encoder:
+  image_channels: 3
+  image_size: 64
+  state_dim: 3
+  crop_road: true
+
+training:
+  lr: 1.0e-4
+  epochs: 50
+  batch_size: 32
+  seq_len: 50
+  bptt_window: 50
+  grad_clip: 100.0
+  free_nats: 1.0
+  kl_dyn_scale: 1.0
+  kl_rep_scale: 0.5
+  lr_warmup_steps: 1000
+
+ensemble:
+  num_heads: 5
+  hidden_dim: 256
+
+cem:
+  horizon: 12
+  n_samples: 200
+  n_elites: 20
+  n_iters: 3
+  colored_noise_beta: 1.0
+  warm_start: true
+  action_dim: 2
+
+preference:
+  K: 3
+  min_std: 1.0
+  update_interval: 1
+  warmup_epoch: 10
+  fit_iters: 200
+  fit_lr: 0.01
+
+efe:
+  beta_instrumental: 1.0
+  beta_epistemic: 1.0
+  mc_samples: 32
+
+evaluation:
+  episodes: 5
+  max_frames: 1000
+  epistemic_anneal: 0.1
+  towns:
+    task_a: Town04
+    task_b: Town03
+    baseline: Town06
+
+data:
+  carla_version: "0.9.16"
+  collection_town: Town06
+  num_samples: 72000
+  fps: 20
+  image_capture_size: 256
+  image_model_size: 64

@@ -1,0 +1,238 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1773974269542,
+  "projectRoot": "/data/jaerock/projects/active-inference-claude",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "pyproject.toml"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "pytest",
+        "version": null,
+        "category": "testing"
+      }
+    ],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": "pytest",
+    "lintCommand": "ruff check",
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts",
+      "src",
+      "tests"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "configs": {
+      "path": "configs",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1773974269538,
+      "keyFiles": [
+        "default.yaml"
+      ]
+    },
+    "data": {
+      "path": "data",
+      "purpose": "Data files",
+      "fileCount": 4,
+      "lastAccessed": 1773974269539,
+      "keyFiles": [
+        "collect_log.txt",
+        "expert_data.h5",
+        "expert_data_v2.h5",
+        "expert_data_v3.h5"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 0,
+      "lastAccessed": 1773974269539,
+      "keyFiles": []
+    },
+    "outputs": {
+      "path": "outputs",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1773974269540,
+      "keyFiles": []
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 7,
+      "lastAccessed": 1773974269540,
+      "keyFiles": [
+        "collect_data.py",
+        "collect_preference_data.py",
+        "coverage_check.py",
+        "evaluate.py",
+        "run_pipeline.py"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1773974269541,
+      "keyFiles": []
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 15,
+      "lastAccessed": 1773974269541,
+      "keyFiles": [
+        "__init__.py",
+        "conftest.py",
+        "test_agent.py",
+        "test_carla_env.py",
+        "test_cem.py"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "docs/plans/2026-03-16-fix-data-collection-and-retrain.md",
+      "accessCount": 1,
+      "lastAccessed": 1773979289171,
+      "type": "file"
+    },
+    {
+      "path": "docs/plans/2026-03-18-evaluation-overhaul-design.md",
+      "accessCount": 1,
+      "lastAccessed": 1773979289439,
+      "type": "file"
+    },
+    {
+      "path": "docs/plans/2026-03-18-evaluation-results-v3.md",
+      "accessCount": 1,
+      "lastAccessed": 1773979290050,
+      "type": "file"
+    },
+    {
+      "path": "",
+      "accessCount": 1,
+      "lastAccessed": 1773979329953,
+      "type": "directory"
+    },
+    {
+      "path": "src/active_inference/evaluation/routes.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979332018,
+      "type": "file"
+    },
+    {
+      "path": "scripts/evaluate.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979332171,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/planning/cem_planner.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979332592,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/agent.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979332808,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/training/preference.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979332894,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/planning/efe.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979335009,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/models/rssm.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979335235,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/data/carla_env.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979335683,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/config.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979335778,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/models/encoder.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979337961,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/models/ensemble.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979338188,
+      "type": "file"
+    },
+    {
+      "path": "scripts/collect_preference_data.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979338455,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_agent.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979340086,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_efe.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979340353,
+      "type": "file"
+    },
+    {
+      "path": "tests/test_preference.py",
+      "accessCount": 1,
+      "lastAccessed": 1773979340530,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

@@ -1,0 +1,70 @@
+seed: 42
+device: cpu
+
+rssm:
+  deter_dim: 32
+  stoch_dim: 8
+  embed_dim: 32
+  min_std: 0.1
+  logvar_clip_low: -20
+  logvar_clip_high: 2
+
+encoder:
+  image_channels: 3
+  image_size: 64
+  state_dim: 2
+
+training:
+  lr: 1.0e-3
+  epochs: 2
+  batch_size: 4
+  seq_len: 5
+  bptt_window: 5
+  grad_clip: 100.0
+  free_nats: 1.0
+  kl_dyn_scale: 1.0
+  kl_rep_scale: 0.1
+  lr_warmup_steps: 10
+
+ensemble:
+  num_heads: 2
+  hidden_dim: 32
+
+cem:
+  horizon: 3
+  n_samples: 10
+  n_elites: 3
+  n_iters: 2
+  colored_noise_beta: 1.0
+  warm_start: true
+  action_dim: 2
+
+preference:
+  K: 2
+  min_std: 0.01
+  update_interval: 1
+  warmup_epoch: 1
+  fit_iters: 10
+  fit_lr: 0.01
+
+efe:
+  beta_instrumental: 1.0
+  beta_epistemic: 0.1
+  mc_samples: 4
+
+evaluation:
+  episodes: 1
+  max_frames: 20
+  epistemic_anneal: 0.1
+  towns:
+    task_a: Town04
+    task_b: Town03
+    baseline: Town06
+
+data:
+  carla_version: "0.9.16"
+  collection_town: Town06
+  num_samples: 100
+  fps: 20
+  image_capture_size: 256
+  image_model_size: 64

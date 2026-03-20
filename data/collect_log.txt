@@ -1,0 +1,149 @@
+Ep    1 [high  ] spd=  30 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 500/72000
+Ep    2 [high  ] spd=  18 |  500fr col=0 lat=0.016 task=A(lane_keep) ok=True | 1000/72000
+Ep    3 [random] spd=  42 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 1500/72000
+Ep    4 [clean ] spd=  21 |  500fr col=0 lat=0.024 task=A(lane_keep) ok=True | 2000/72000
+Ep    5 [high  ] spd=  40 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 2500/72000
+Ep    6 [medium] spd=  46 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 3000/72000
+Ep    7 [medium] spd=  19 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 3500/72000
+Ep    8 [high  ] spd=  21 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 4000/72000
+Ep    9 [medium] spd=  50 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 4500/72000
+Ep   10 [clean ] spd=  50 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 5000/72000
+Ep   11 [medium] spd=  19 |  500fr col=0 lat=0.014 task=A(lane_keep) ok=True | 5500/72000
+Ep   12 [high  ] spd=  34 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 6000/72000
+Ep   13 [medium] spd=  25 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 6500/72000
+Ep   14 [medium] spd=  25 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 7000/72000
+Ep   15 [high  ] spd=  44 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 7500/72000
+Ep   16 [medium] spd=  23 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 8000/72000
+Ep   17 [high  ] spd=  24 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 8500/72000
+Ep   18 [medium] spd=  29 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 9000/72000
+Ep   19 [high  ] spd=  40 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 9500/72000
+Ep   20 [high  ] spd=  49 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 10000/72000
+Ep   21 [medium] spd=  33 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 10500/72000
+Ep   22 [high  ] spd=  33 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 11000/72000
+Ep   23 [medium] spd=  18 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 11500/72000
+Ep   24 [medium] spd=  39 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 12000/72000
+Ep   25 [clean ] spd=  49 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 12500/72000
+Ep   26 [clean ] spd=  45 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 13000/72000
+Ep   27 [high  ] spd=  22 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 13500/72000
+Ep   28 [high  ] spd=  46 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 14000/72000
+Ep   29 [medium] spd=  33 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 14500/72000
+Ep   30 [high  ] spd=  42 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 15000/72000
+Ep   31 [medium] spd=  19 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 15500/72000
+Ep   32 [high  ] spd=  43 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 16000/72000
+Ep   33 [clean ] spd=  22 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 16500/72000
+Ep   34 [clean ] spd=  49 |  500fr col=0 lat=0.001 task=A(lane_keep) ok=True | 17000/72000
+Ep   35 [medium] spd=  40 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 17500/72000
+Ep   36 [medium] spd=  26 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 18000/72000
+Ep   37 [medium] spd=  35 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 18500/72000
+Ep   38 [medium] spd=  48 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 19000/72000
+Ep   39 [medium] spd=  22 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 19500/72000
+Ep   40 [medium] spd=  20 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 20000/72000
+Ep   41 [clean ] spd=  39 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 20500/72000
+Ep   42 [random] spd=  24 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 21000/72000
+Ep   43 [high  ] spd=  47 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 21500/72000
+Ep   44 [medium] spd=  37 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 22000/72000
+Ep   45 [medium] spd=  50 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 22500/72000
+Ep   46 [medium] spd=  46 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 23000/72000
+Ep   47 [medium] spd=  43 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 23500/72000
+Ep   48 [random] spd=  46 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 24000/72000
+Ep   49 [medium] spd=  37 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 24500/72000
+Ep   50 [medium] spd=  19 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 25000/72000
+Ep   51 [clean ] spd=  23 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 25500/72000
+Ep   52 [clean ] spd=  23 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 26000/72000
+Ep   53 [medium] spd=  23 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 26500/72000
+Ep   54 [medium] spd=  28 |  500fr col=0 lat=0.034 task=A(lane_keep) ok=True | 27000/72000
+Ep   55 [medium] spd=  47 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 27500/72000
+Ep   56 [high  ] spd=  47 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 28000/72000
+Ep   57 [high  ] spd=  37 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 28500/72000
+Ep   58 [medium] spd=  39 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 29000/72000
+Ep   59 [clean ] spd=  49 |  500fr col=0 lat=0.006 task=A(lane_keep) ok=True | 29500/72000
+Ep   60 [high  ] spd=  28 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 30000/72000
+Ep   61 [clean ] spd=  33 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 30500/72000
+Ep   62 [medium] spd=  27 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 31000/72000
+Ep   63 [clean ] spd=  33 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 31500/72000
+Ep   64 [random] spd=  21 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 32000/72000
+Ep   65 [clean ] spd=  19 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 32500/72000
+Ep   66 [medium] spd=  32 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 33000/72000
+Ep   67 [medium] spd=  35 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 33500/72000
+Ep   68 [high  ] spd=  38 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 34000/72000
+Ep   69 [medium] spd=  27 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 34500/72000
+Ep   70 [medium] spd=  26 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 35000/72000
+Ep   71 [medium] spd=  39 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 35500/72000
+Ep   72 [clean ] spd=  30 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 36000/72000
+Ep   73 [high  ] spd=  16 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 36500/72000
+Ep   74 [clean ] spd=  33 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 37000/72000
+Ep   75 [medium] spd=  15 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 37500/72000
+Ep   76 [medium] spd=  48 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 38000/72000
+Ep   77 [medium] spd=  45 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 38500/72000
+Ep   78 [medium] spd=  22 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 39000/72000
+Ep   79 [high  ] spd=  34 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 39500/72000
+Ep   80 [medium] spd=  24 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 40000/72000
+Ep   81 [clean ] spd=  39 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 40500/72000
+Ep   82 [clean ] spd=  41 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 41000/72000
+Ep   83 [high  ] spd=  18 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 41500/72000
+Ep   84 [high  ] spd=  38 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 42000/72000
+Ep   85 [clean ] spd=  44 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 42500/72000
+Ep   86 [high  ] spd=  46 |  500fr col=0 lat=0.003 task=A(lane_keep) ok=True | 43000/72000
+Ep   87 [high  ] spd=  33 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 43500/72000
+Ep   88 [medium] spd=  19 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 44000/72000
+Ep   89 [high  ] spd=  20 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 44500/72000
+Ep   90 [clean ] spd=  25 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 45000/72000
+Ep   91 [clean ] spd=  37 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 45500/72000
+Ep   92 [clean ] spd=  45 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 46000/72000
+Ep   93 [high  ] spd=  27 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 46500/72000
+Ep   94 [medium] spd=  20 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 47000/72000
+Ep   95 [medium] spd=  18 |  500fr col=0 lat=0.048 task=A(lane_keep) ok=True | 47500/72000
+Ep   96 [high  ] spd=  44 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 48000/72000
+Ep   97 [medium] spd=  35 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 48500/72000
+Ep   98 [clean ] spd=  18 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 49000/72000
+Ep   99 [medium] spd=  27 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 49500/72000
+Ep  100 [clean ] spd=  36 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 50000/72000
+Ep  101 [medium] spd=  22 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 50500/72000
+Ep  102 [medium] spd=  46 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 51000/72000
+Ep  103 [medium] spd=  39 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 51500/72000
+Ep  104 [medium] spd=  44 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 52000/72000
+Ep  105 [high  ] spd=  35 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 52500/72000
+Ep  106 [clean ] spd=  50 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 53000/72000
+Ep  107 [high  ] spd=  48 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 53500/72000
+Ep  108 [clean ] spd=  43 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 54000/72000
+Ep  109 [medium] spd=  43 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 54500/72000
+Ep  110 [medium] spd=  41 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 55000/72000
+Ep  111 [high  ] spd=  37 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 55500/72000
+Ep  112 [medium] spd=  49 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 56000/72000
+Ep  113 [medium] spd=  31 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 56500/72000
+Ep  114 [medium] spd=  34 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 57000/72000
+Ep  115 [medium] spd=  44 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 57500/72000
+Ep  116 [high  ] spd=  35 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 58000/72000
+Ep  117 [medium] spd=  40 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 58500/72000
+Ep  118 [medium] spd=  39 |  500fr col=0 lat=0.063 task=B(lane_change) ok=True | 59000/72000
+Ep  119 [high  ] spd=  39 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 59500/72000
+Ep  120 [clean ] spd=  32 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 60000/72000
+Ep  121 [medium] spd=  15 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 60500/72000
+Ep  122 [medium] spd=  20 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 61000/72000
+Ep  123 [high  ] spd=  40 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 61500/72000
+Ep  124 [medium] spd=  45 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 62000/72000
+Ep  125 [medium] spd=  35 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 62500/72000
+Ep  126 [medium] spd=  40 |  500fr col=0 lat=0.048 task=A(lane_keep) ok=True | 63000/72000
+Ep  127 [medium] spd=  32 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 63500/72000
+Ep  128 [high  ] spd=  25 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 64000/72000
+Ep  129 [random] spd=  40 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 64500/72000
+Ep  130 [medium] spd=  33 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 65000/72000
+Ep  131 [high  ] spd=  24 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 65500/72000
+Ep  132 [clean ] spd=  37 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 66000/72000
+Ep  133 [high  ] spd=  43 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 66500/72000
+Ep  134 [medium] spd=  44 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 67000/72000
+Ep  135 [medium] spd=  37 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 67500/72000
+Ep  136 [clean ] spd=  34 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 68000/72000
+Ep  137 [clean ] spd=  41 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 68500/72000
+Ep  138 [high  ] spd=  19 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 69000/72000
+Ep  139 [high  ] spd=  17 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 69500/72000
+Ep  140 [high  ] spd=  17 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 70000/72000
+Ep  141 [clean ] spd=  16 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 70500/72000
+Ep  142 [high  ] spd=  19 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 71000/72000
+Ep  143 [clean ] spd=  35 |  500fr col=0 lat=0.000 task=A(lane_keep) ok=True | 71500/72000
+Ep  144 [high  ] spd=  48 |  500fr col=0 lat=0.000 task=B(lane_change) ok=True | 72000/72000
+
+Saved 72000 frames (144 episodes) to data/expert_data.h5
+Tier distribution: clean=31, medium=66, high=42, random=5
+Task A frames: 63500, Task B frames: 8500
+Success frames: 72000/72000 (100.0%)
