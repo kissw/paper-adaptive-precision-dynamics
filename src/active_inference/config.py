@@ -53,6 +53,7 @@ class CEMConfig:
     colored_noise_beta: float = 1.0
     warm_start: bool = True
     action_dim: int = 2
+    noise_scale: list[float] | None = None
 
 
 @dataclass

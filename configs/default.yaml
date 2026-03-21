@@ -12,7 +12,7 @@ rssm:
 encoder:
   image_channels: 3
   image_size: 64
-  state_dim: 2
+  state_dim: 4
   crop_road: true
 
 training:
@@ -32,25 +32,27 @@ ensemble:
   hidden_dim: 256
 
 cem:
-  horizon: 12
-  n_samples: 200
-  n_elites: 20
-  n_iters: 3
+  horizon: 25
+  n_samples: 500
+  n_elites: 50
+  n_iters: 5
   colored_noise_beta: 1.0
   warm_start: true
   action_dim: 2
+  noise_scale: [1.5, 1.0]
 
 preference:
-  K: 3
-  min_std: 1.0
+  K: 5
+  min_std: 0.01
   update_interval: 1
   warmup_epoch: 10
-  fit_iters: 200
-  fit_lr: 0.01
+  fit_iters: 300
+  fit_lr: 0.005
+  max_samples: 5000
 
 efe:
   beta_instrumental: 1.0
-  beta_epistemic: 1.0
+  beta_epistemic: 0.1
   mc_samples: 32
 
 evaluation:

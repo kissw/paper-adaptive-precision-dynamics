@@ -29,13 +29,13 @@ class OUNoise:
         self._x = np.zeros_like(self._x)
 
 
-# --- 3-tier noise allocation ---
-# Tier distribution: 25% clean, 40% medium, 30% high, 5% random burst
+# --- 4-tier noise allocation ---
+# More off-center driving for negative examples (sharper preference boundaries)
 TIERS = {
-    "clean": {"sigma": [0.0, 0.0], "weight": 0.25},
-    "medium": {"sigma": [0.15, 0.10], "weight": 0.40},
-    "high": {"sigma": [0.30, 0.20], "weight": 0.30},
-    "random": {"sigma": [1.0, 1.0], "weight": 0.05},
+    "clean": {"sigma": [0.0, 0.0], "weight": 0.15},
+    "medium": {"sigma": [0.30, 0.10], "weight": 0.35},
+    "high": {"sigma": [0.60, 0.20], "weight": 0.35},
+    "random": {"sigma": [1.0, 1.0], "weight": 0.15},
 }
 
 

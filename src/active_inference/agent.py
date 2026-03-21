@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -66,6 +65,7 @@ class DeepAIFAgent:
             n_iters=cfg.cem.n_iters,
             colored_noise_beta=cfg.cem.colored_noise_beta,
             warm_start=cfg.cem.warm_start,
+            noise_scale=cfg.cem.noise_scale,
         )
         self.efe_scorer = EFEScorer(
             beta_instrumental=cfg.efe.beta_instrumental,
@@ -87,20 +87,7 @@ class DeepAIFAgent:
         if self._prev_state is None:
             self.reset()
 
-        # Extract steering signals before slicing (not fed to model).
-        heading_error = None
-        crosstrack_error = 0.0
-        if obs_state.shape[-1] >= 4:
-            heading_error = float(obs_state[..., 2])
-            crosstrack_error = float(obs_state[..., 3])
-        elif obs_state.shape[-1] >= 3:
-            heading_error = float(obs_state[..., 2])
-
-        # Slice state to match encoder's expected state_dim (handles 3D env → 2D model)
-        expected_dim = self._cfg.encoder.state_dim
-        if obs_state.shape[-1] > expected_dim:
-            obs_state = obs_state[..., :expected_dim]
-
+        # Full 4D state [speed, steer, heading_error, crosstrack_error] to encoder
         img = (
             obs_img.unsqueeze(0).to(self._device)
             if obs_img.dim() == 3
@@ -123,29 +110,6 @@ class DeepAIFAgent:
             self.world_model.ensemble,
         )
 
-        # Post-CEM steering override: Stanley controller using road heading
-        # error + crosstrack correction. CEM handles longitudinal (speed)
-        # control via EFE; lateral uses classical Stanley feedback.
-        if heading_error is not None:
-            speed = float(obs_state[..., 0]) if obs_state.shape[-1] >= 1 else 1.0
-            # Stanley: steer = heading_error + arctan(k * crosstrack / (speed + eps))
-            # Negative signs: heading_error>0 → road left → steer left (negative)
-            #                 crosstrack>0 → vehicle right → steer left (negative)
-            k_heading = 1.5
-            k_crosstrack = 2.0
-            # Positive steer = LEFT turn in CARLA (counterclockwise yaw increase).
-            # heading_error > 0 → road is left → steer left (positive).
-            # crosstrack > 0 → vehicle right of center → steer left (positive).
-            stanley_steer = k_heading * heading_error + np.arctan2(
-                k_crosstrack * crosstrack_error, max(speed, 0.5)
-            )
-            corrected_steer = max(-1.0, min(1.0, stanley_steer))
-            corrected_action = plan_result.action.clone()
-            corrected_action[0] = corrected_steer
-            plan_result = PlanResult(
-                corrected_action, plan_result.efe_score, plan_result.epistemic_score
-            )
-
         self._prev_state = post
         self._prev_action = plan_result.action.unsqueeze(0)
         return plan_result
@@ -155,11 +119,6 @@ class DeepAIFAgent:
         return self.step_with_info(obs_img, obs_state).action
 
     def update(self, images: Tensor, states: Tensor, actions: Tensor) -> dict[str, float]:
-        # Slice state to match encoder's expected state_dim
-        expected_dim = self._cfg.encoder.state_dim
-        if states.shape[-1] > expected_dim:
-            states = states[..., :expected_dim]
-
         # Per-timestep backward with NaN guard and CUDA error recovery
         B, T = images.shape[0], images.shape[1]
         wm = self.world_model

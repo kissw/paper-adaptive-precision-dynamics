@@ -19,7 +19,7 @@ def test_dataset_sequence_extraction(small_h5):
     ds = SequenceDataset(small_h5, seq_len=seq_len)
     images, states, actions = ds[0]
     assert images.shape == (seq_len, 3, 64, 64)
-    assert states.shape == (seq_len, 2)
+    assert states.shape == (seq_len, 4)
     assert actions.shape == (seq_len, 2)
     assert isinstance(images, torch.Tensor)
     assert isinstance(states, torch.Tensor)
@@ -52,7 +52,7 @@ def test_dataloader_batching(small_h5):
     batch = next(iter(dl))
     images, states, actions = batch
     assert images.shape == (batch_size, seq_len, 3, 64, 64)
-    assert states.shape == (batch_size, seq_len, 2)
+    assert states.shape == (batch_size, seq_len, 4)
     assert actions.shape == (batch_size, seq_len, 2)
 
 

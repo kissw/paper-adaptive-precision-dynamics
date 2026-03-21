@@ -11,7 +11,7 @@ def test_forward_pass():
     agent = DeepAIFAgent(_debug_cfg())
     agent.reset()
     img = torch.randn(3, 64, 64)
-    state = torch.randn(2)
+    state = torch.randn(4)
     action = agent.step(img, state)
     assert action.shape == (2,)
 
@@ -19,7 +19,7 @@ def test_forward_pass():
 def test_action_range():
     agent = DeepAIFAgent(_debug_cfg())
     agent.reset()
-    action = agent.step(torch.randn(3, 64, 64), torch.randn(2))
+    action = agent.step(torch.randn(3, 64, 64), torch.randn(4))
     assert (action >= -1.0).all() and (action <= 1.0).all()
 
 
@@ -29,7 +29,7 @@ def test_checkpoint_roundtrip(tmp_path):
     agent = DeepAIFAgent(cfg)
     agent.reset()
     img = torch.randn(3, 64, 64)
-    st = torch.randn(2)
+    st = torch.randn(4)
 
     path = str(tmp_path / "ckpt.pt")
     agent.save_checkpoint(path)
@@ -49,7 +49,7 @@ def test_update_reduces_loss():
     agent = DeepAIFAgent(cfg)
     B, T = 2, cfg.training.seq_len
     images = torch.randn(B, T, 3, 64, 64)
-    states = torch.randn(B, T, 2)
+    states = torch.randn(B, T, 4)
     actions = torch.randn(B, T, 2).clamp(-1, 1)
 
     info1 = agent.update(images, states, actions)

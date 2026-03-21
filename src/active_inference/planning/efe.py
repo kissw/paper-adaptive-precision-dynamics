@@ -20,18 +20,15 @@ class EFEScorer:
     def instrumental_value(
         self, q_mean: Tensor, q_std: Tensor, pref_model: PreferenceModel
     ) -> Tensor:
-        # Cross-entropy E_q[-log p_pref(z)], normalized by latent dim.
+        # Cross-entropy E_q[-log p_pref(z)].
         # Using cross-entropy instead of full KL because the entropy term
-        # H(q) is approximately constant w.r.t. action selection, and full
-        # KL in high-dim spaces produces values too large for CEM to
-        # differentiate action sequences.
+        # H(q) is approximately constant w.r.t. action selection.
+        # Raw cross-entropy preserves the full gradient signal for CEM.
         # q_mean, q_std: [B, D]
-        latent_dim = q_mean.shape[-1]
         q = Normal(q_mean, q_std)
         z = q.rsample((self._mc_samples,))  # [S, B, D]
         log_p = pref_model.log_prob(z)  # [S, B]
-        # Negative cross-entropy, normalized per dimension
-        return -log_p.mean(0) / latent_dim  # [B]
+        return -log_p.mean(0)  # [B]
 
     def epistemic_value_ensemble(self, ensemble: EnsembleTransitionHeads, feat: Tensor) -> Tensor:
         return ensemble.epistemic_uncertainty(feat)  # [B]

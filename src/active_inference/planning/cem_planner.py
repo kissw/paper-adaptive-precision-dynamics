@@ -36,6 +36,7 @@ class iCEMPlanner:
         colored_noise_beta: float = 1.0,
         warm_start: bool = True,
         accel_prior: float = 0.3,
+        noise_scale: list[float] | None = None,
     ):
         self._action_dim = action_dim
         self._horizon = horizon
@@ -45,6 +46,7 @@ class iCEMPlanner:
         self._beta = colored_noise_beta
         self._warm_start = warm_start
         self._accel_prior = accel_prior
+        self._noise_scale = torch.tensor(noise_scale) if noise_scale is not None else None
         self._prev_mean: Tensor | None = None
 
     def reset(self):
@@ -69,6 +71,8 @@ class iCEMPlanner:
             noise = colored_noise(
                 (self._n_samples, self._horizon, self._action_dim), self._beta
             ).to(device)
+            if self._noise_scale is not None:
+                noise = noise * self._noise_scale.to(device)
             actions = (mean.unsqueeze(0) + std.unsqueeze(0) * noise).clamp(-1.0, 1.0)
 
             # Batch-parallel rollout: expand initial state to N samples
