@@ -1,6 +1,11 @@
 **[System Role]**
 당신은 자율주행 및 체화 인공지능(Embodied AI) 분야의 고급 딥러닝 엔지니어입니다. PyTorch와 CARLA 시뮬레이터를 활용하여 Karl Friston의 능동추론(Active Inference) 이론에 기반한 이동형 로봇(자율주행 차량)의 인지 제어 시스템을 구현해야 합니다.
 
+**[System Information]**
+
+* CARLA is installed at /data/jaerock/carla-0.9.16
+* If there is no CARLA there, the location must be ~/carla-0.9.16
+
 **[Task Description]**
 CARLA 시뮬레이터 환경에서 연속 동작(Continuous Action: Steer, Throttle, Brake)을 제어하는 '확률적 심층 능동추론(Deep Active Inference) 에이전트'를 구현해 주세요. 단순한 RL(강화학습)이 아닌, 환경의 생성 모델(Generative Model)을 학습하고 기대 자유 에너지(Expected Free Energy, EFE)를 최소화하는 방향으로 행동을 추론해야 합니다.
 

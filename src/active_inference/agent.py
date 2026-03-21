@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -11,7 +12,7 @@ from active_inference.models.encoder import ConvEncoder
 from active_inference.models.decoder import ObsDecoder, StateDecoder
 from active_inference.models.rssm import RSSM, RSSMState
 from active_inference.models.ensemble import EnsembleTransitionHeads
-from active_inference.planning.cem_planner import iCEMPlanner
+from active_inference.planning.cem_planner import iCEMPlanner, PlanResult
 from active_inference.planning.efe import EFEScorer
 from active_inference.training.losses import compute_vfe
 from active_inference.training.preference import PreferenceModel
@@ -82,9 +83,23 @@ class DeepAIFAgent:
         self.planner.reset()
 
     @torch.no_grad()
-    def step(self, obs_img: Tensor, obs_state: Tensor) -> Tensor:
+    def step_with_info(self, obs_img: Tensor, obs_state: Tensor) -> PlanResult:
         if self._prev_state is None:
             self.reset()
+
+        # Extract steering signals before slicing (not fed to model).
+        heading_error = None
+        crosstrack_error = 0.0
+        if obs_state.shape[-1] >= 4:
+            heading_error = float(obs_state[..., 2])
+            crosstrack_error = float(obs_state[..., 3])
+        elif obs_state.shape[-1] >= 3:
+            heading_error = float(obs_state[..., 2])
+
+        # Slice state to match encoder's expected state_dim (handles 3D env → 2D model)
+        expected_dim = self._cfg.encoder.state_dim
+        if obs_state.shape[-1] > expected_dim:
+            obs_state = obs_state[..., :expected_dim]
 
         img = (
             obs_img.unsqueeze(0).to(self._device)
@@ -100,7 +115,7 @@ class DeepAIFAgent:
         embed = self.world_model.encoder(img, st)
         post, _ = self.world_model.rssm.obs_step(self._prev_state, self._prev_action, embed)
 
-        action = self.planner.plan(
+        plan_result = self.planner.plan(
             post,
             self.world_model.rssm,
             self.efe_scorer,
@@ -108,11 +123,43 @@ class DeepAIFAgent:
             self.world_model.ensemble,
         )
 
+        # Post-CEM steering override: Stanley controller using road heading
+        # error + crosstrack correction. CEM handles longitudinal (speed)
+        # control via EFE; lateral uses classical Stanley feedback.
+        if heading_error is not None:
+            speed = float(obs_state[..., 0]) if obs_state.shape[-1] >= 1 else 1.0
+            # Stanley: steer = heading_error + arctan(k * crosstrack / (speed + eps))
+            # Negative signs: heading_error>0 → road left → steer left (negative)
+            #                 crosstrack>0 → vehicle right → steer left (negative)
+            k_heading = 1.5
+            k_crosstrack = 2.0
+            # Positive steer = LEFT turn in CARLA (counterclockwise yaw increase).
+            # heading_error > 0 → road is left → steer left (positive).
+            # crosstrack > 0 → vehicle right of center → steer left (positive).
+            stanley_steer = k_heading * heading_error + np.arctan2(
+                k_crosstrack * crosstrack_error, max(speed, 0.5)
+            )
+            corrected_steer = max(-1.0, min(1.0, stanley_steer))
+            corrected_action = plan_result.action.clone()
+            corrected_action[0] = corrected_steer
+            plan_result = PlanResult(
+                corrected_action, plan_result.efe_score, plan_result.epistemic_score
+            )
+
         self._prev_state = post
-        self._prev_action = action.unsqueeze(0)
-        return action
+        self._prev_action = plan_result.action.unsqueeze(0)
+        return plan_result
+
+    @torch.no_grad()
+    def step(self, obs_img: Tensor, obs_state: Tensor) -> Tensor:
+        return self.step_with_info(obs_img, obs_state).action
 
     def update(self, images: Tensor, states: Tensor, actions: Tensor) -> dict[str, float]:
+        # Slice state to match encoder's expected state_dim
+        expected_dim = self._cfg.encoder.state_dim
+        if states.shape[-1] > expected_dim:
+            states = states[..., :expected_dim]
+
         # Per-timestep backward with NaN guard and CUDA error recovery
         B, T = images.shape[0], images.shape[1]
         wm = self.world_model
@@ -249,9 +296,13 @@ class DeepAIFAgent:
         }
 
     @staticmethod
-    def action_to_carla(action_2d: Tensor) -> tuple[float, float, float]:
+    def action_to_carla(
+        action_2d: Tensor,
+        min_throttle: float = 0.35,
+        max_throttle: float = 0.55,
+    ) -> tuple[float, float, float]:
         steer = float(action_2d[0].clamp(-1, 1))
         accel = float(action_2d[1].clamp(-1, 1))
-        throttle = max(accel, 0.0)
-        brake = max(-accel, 0.0)
+        throttle = min_throttle + (max_throttle - min_throttle) * (accel + 1.0) / 2.0
+        brake = 0.0
         return steer, throttle, brake

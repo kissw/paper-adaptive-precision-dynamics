@@ -79,7 +79,7 @@ class EFEConfig:
 @dataclass
 class EvalTowns:
     task_a: str = "Town04"
-    task_b: str = "Town03"
+    task_b: str = "Town06_Opt"
     baseline: str = "Town06"
 
 

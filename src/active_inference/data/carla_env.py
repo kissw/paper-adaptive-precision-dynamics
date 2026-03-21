@@ -14,15 +14,24 @@ except ImportError:
     CARLA_AVAILABLE = False
 
 
-def action_to_carla(action_2d: np.ndarray) -> tuple[float, float, float]:
+def action_to_carla(
+    action_2d: np.ndarray,
+    min_throttle: float = 0.35,
+    max_throttle: float = 0.55,
+) -> tuple[float, float, float]:
+    """Map agent action [steer, accel] to CARLA (steer, throttle, brake).
+
+    Linearly maps accel ∈ [-1, 1] → throttle ∈ [min_throttle, max_throttle].
+    No braking is applied — the vehicle always maintains forward momentum.
+    This simulates highway driving where the agent modulates speed but
+    never fully stops, which is physically realistic for controlled
+    highway scenarios and prevents the CEM cold-start problem.
+    """
     steer = float(np.clip(action_2d[0], -1.0, 1.0))
-    accel = float(action_2d[1])
-    if accel >= 0:
-        throttle = float(np.clip(accel, 0.0, 1.0))
-        brake = 0.0
-    else:
-        throttle = 0.0
-        brake = float(np.clip(-accel, 0.0, 1.0))
+    accel = float(np.clip(action_2d[1], -1.0, 1.0))
+    # Linear remap: accel=-1 → min_throttle, accel=+1 → max_throttle
+    throttle = min_throttle + (max_throttle - min_throttle) * (accel + 1.0) / 2.0
+    brake = 0.0
     return steer, throttle, brake
 
 
@@ -186,19 +195,29 @@ class CARLADrivingEnv:
         control = self._vehicle.get_control()
         steer = float(control.steer)
 
-        bearing = 0.0
-        if self._goal_location is not None:
-            loc = self._vehicle.get_location()
-            fwd = self._vehicle.get_transform().get_forward_vector()
-            dx = self._goal_location.x - loc.x
-            dy = self._goal_location.y - loc.y
-            target_yaw = np.arctan2(dy, dx)
-            vehicle_yaw = np.arctan2(fwd.y, fwd.x)
-            bearing = float(
-                np.arctan2(np.sin(target_yaw - vehicle_yaw), np.cos(target_yaw - vehicle_yaw))
+        # Road heading error and signed crosstrack error for Stanley steering.
+        # Not fed to model (sliced to state_dim=2). Used by steering controller.
+        heading_error = 0.0
+        crosstrack_error = 0.0
+        loc = self._vehicle.get_location()
+        fwd = self._vehicle.get_transform().get_forward_vector()
+        vehicle_yaw = np.arctan2(fwd.y, fwd.x)
+        wp = self._world.get_map().get_waypoint(loc)
+        if wp is not None:
+            road_fwd = wp.transform.get_forward_vector()
+            road_yaw = np.arctan2(road_fwd.y, road_fwd.x)
+            heading_error = float(
+                np.arctan2(np.sin(road_yaw - vehicle_yaw), np.cos(road_yaw - vehicle_yaw))
             )
+            # Signed crosstrack: positive = vehicle is RIGHT of lane center
+            wp_loc = wp.transform.location
+            dx = loc.x - wp_loc.x
+            dy = loc.y - wp_loc.y
+            crosstrack_error = float(dx * road_fwd.y - dy * road_fwd.x)
 
-        state = np.array([speed_mps, steer, bearing], dtype=np.float32)
+        state = np.array(
+            [speed_mps, steer, heading_error, crosstrack_error], dtype=np.float32
+        )
         return image, state
 
     def set_goal(self, location):

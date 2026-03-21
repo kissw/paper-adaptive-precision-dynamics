@@ -33,9 +33,11 @@ def test_cem_bounds_respected():
     rssm, ens, pref, scorer = _make_small_components()
     planner = iCEMPlanner(action_dim=2, horizon=3, n_samples=20, n_elites=5, n_iters=2)
     state = rssm.initial(1)
-    action = planner.plan(state, rssm, scorer, pref, ens)
-    assert action.shape == (2,)
-    assert (action >= -1.0).all() and (action <= 1.0).all()
+    result = planner.plan(state, rssm, scorer, pref, ens)
+    assert result.action.shape == (2,)
+    assert (result.action >= -1.0).all() and (result.action <= 1.0).all()
+    assert isinstance(result.efe_score, float)
+    assert isinstance(result.epistemic_score, float)
 
 
 def test_cem_warm_start():
@@ -59,5 +61,5 @@ def test_cem_output_shape():
     rssm, ens, pref, scorer = _make_small_components()
     planner = iCEMPlanner(action_dim=2, horizon=3, n_samples=10, n_elites=3, n_iters=2)
     state = rssm.initial(1)
-    action = planner.plan(state, rssm, scorer, pref, ens)
-    assert action.shape == (2,)
+    result = planner.plan(state, rssm, scorer, pref, ens)
+    assert result.action.shape == (2,)

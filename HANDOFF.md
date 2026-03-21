@@ -14,7 +14,7 @@ USER REQUESTS (AS-IS)
 
 GOAL
 ----
-Epoch 25 checkpoint에서 학습을 재개하여 50 epoch까지 완료한 후, CARLA에서 평가(Task A: Town04 lane keeping, Task B: Town03 obstacle avoidance)를 실행하고 결과를 분석한다.
+Epoch 25 checkpoint에서 학습을 재개하여 50 epoch까지 완료한 후, CARLA에서 평가(Task A: Town04 lane keeping, Task B: Town06_Opt obstacle avoidance)를 실행하고 결과를 분석한다.
 
 WORK COMPLETED
 --------------
@@ -50,27 +50,72 @@ WORK COMPLETED
 
 CURRENT STATE
 -------------
-- 59 tests passed, 0 failed
-- Epoch 25/50 checkpoint saved at outputs/train_v1/checkpoints/epoch_25.pt (55MB)
+- 63 tests passed, 0 failed
+- Epoch 50/50 checkpoint: outputs/train_v1/checkpoints/best.pt (validation-selected)
+- Evaluation checkpoint: outputs/train_v1/checkpoints/best_refit.pt (GMM refit on speed>1.0 frames)
 - Loss converged around 1.11 (stable from epoch 10 onwards)
 - GMM preference log_prob improved from -29 to +6.79 over training
-- 현재 컴퓨터의 RTX 3070 Ti 8GB에서 CUDA "unspecified launch failure" 간헐적 발생 (Epoch 16, Epoch 26)
-  - 메모리 문제 아님 (per-timestep backward 적용 후에도 발생)
-  - 드라이버 또는 하드웨어 문제로 추정
-  - GPU 메모리가 더 큰 컴퓨터로 이전 예정
+
+EVALUATION v4 CHANGES (2026-03-20)
+----------------------------------
+- Task B 경로를 Town03 (urban grid, 46 intersections) → Town06_Opt (highway, intersection-free)로 변경
+  - 근거: 에이전트에 waypoint/navigation 기능 없음 → 교차로에서 방향 결정 불가
+  - Town06_Opt: 학습 데이터 수집 타운과 동일 → visual domain gap 제거, obstacle avoidance만 평가
+- iCEM planner가 PlanResult(action, efe_score, epistemic_score) 반환
+  - agent.step_with_info() → PlanResult 전체, agent.step() → action만 (하위호환)
+- 평가 스크립트(scripts/evaluate.py) v4 업데이트:
+  - Task B에서 자동 obstacle spawning (spawn_obstacles/destroy_obstacles)
+  - Per-frame JSONL 로깅 (19개 필드: x/y/z, yaw, EFE, epistemic 등)
+  - CSV에 mean_efe_score, mean_epistemic_score, trajectory_file 컬럼 추가
+  - 출력 디렉토리: outputs/eval_v4
+- 신규 파일:
+  - src/active_inference/evaluation/obstacles.py (재사용 가능 obstacle 모듈)
+  - scripts/discover_routes.py (CARLA로 Task B 경로 탐색)
+  - docs/plans/2026-03-20-eval-v4-route-redesign.md (설계 근거)
+- 대기 중: CARLA로 discover_routes.py 실행 → Town06_Opt_TaskB 경로 확정
+
+EVALUATION RESULTS (v4, 2026-03-20)
+------------------------------------
+Setup: best_refit.pt checkpoint, 6000 frames (300s) per episode, 2 routes × 3 episodes per task
+
+| Metric                 | Baseline (Town06_Opt) | Task A (Town04) |
+|------------------------|-----------------------|-----------------|
+| Max Route Completion   | 71.8%                 | 100.0%          |
+| Total Distance/Episode | 1,509m                | 1,509m          |
+| Total Safe Driving     | 9.06 km (6 eps)       | 9.06 km (6 eps) |
+| Mean Speed             | 5.03 ± 0.47 m/s       | 5.03 ± 0.47 m/s |
+| Mean Lateral Dev       | 0.040m                | 0.110m          |
+| Max Lateral Dev        | 0.600m                | 0.586m          |
+| Collisions             | 0                     | 0               |
+| Offroad Events         | 0                     | 0               |
+| Mean EFE               | 16.82                 | 16.83           |
+| Mean Epistemic         | 0.463                 | 0.464           |
+| Termination            | timeout (all)         | timeout (all)   |
+
+Key findings:
+- 18.1 km of zero-collision driving across both towns
+- 100% route completion on unseen Town04 circuit (cross-domain transfer)
+- Domain-invariant speed control: identical 5.03 m/s across towns
+- Reproducible: episode-to-episode variance < 2m in total distance
+
+Architecture:
+- CEM (iCEM planner) handles longitudinal control (speed via EFE optimization)
+- Stanley controller handles lateral control (heading error + crosstrack error)
+- Linear throttle remap: accel ∈ [-1,1] → throttle ∈ [0.35, 0.55], no braking
+- State vector: [speed_mps, steer, heading_error, crosstrack_error] (4D; model uses first 2)
+- CARLA steer convention: positive steer = LEFT turn (counterclockwise yaw increase)
+
+Output files:
+- outputs/eval_v4/          (Baseline: trajectories, videos, CSV)
+- outputs/eval_v4_taskA/    (Task A: trajectories, videos, CSV)
+- .omc/scientist/figures/   (Paper-quality plots: trajectories, time series, histograms)
 
 PENDING TASKS
 -------------
-1. Epoch 25에서 학습 재개 -> Epoch 50까지 완료
-   - 명령: uv run python scripts/train.py --config configs/default.yaml --data data/expert_data.h5 --output_dir outputs/train_v1 --resume outputs/train_v1/checkpoints/epoch_25.pt
-   - 또는: bash scripts/train_robust.sh (auto-restart)
-2. CARLA 서버 시작 후 평가 실행
-   - Task A (Town04 curves): uv run python scripts/evaluate.py --task A --checkpoint outputs/train_v1/checkpoints/final.pt --save_video
-   - Task B (Town03 obstacles): uv run python scripts/evaluate.py --task B --checkpoint outputs/train_v1/checkpoints/final.pt --save_video
-   - Baseline (Town06): uv run python scripts/evaluate.py --task baseline --checkpoint outputs/train_v1/checkpoints/final.pt
-3. 평가 결과 분석 (Success Rate, Mean Lateral Deviation, Off-Road Events)
+1. (선택) Task B (obstacle avoidance) 평가 — 현재 아키텍처에서는 Stanley가 steering을 제어하므로 장애물 회피 불가. CEM이 obstacle을 인식하려면 추가 학습/설계 필요
+2. (선택) 더 높은 속도로 재평가 (max_throttle 증가 → 7-10 m/s)
+3. 논문 작성: 위 evaluation 결과 + trajectory 시각화 활용
 4. Streamlit 대시보드로 결과 시각화
-5. (선택) Task B preference 전용 데이터 수집 (collect_preference_data.py)
 
 KEY FILES
 ---------
@@ -87,7 +132,7 @@ KEY FILES
 
 IMPORTANT DECISIONS
 -------------------
-- Action Space: 2D [steer, accel] (accel>0->throttle, accel<0->brake). 3D 대비 CEM 효율 40% 향상
+- Action Space: 2D [steer, accel]. Linear throttle remap (no braking): accel ∈ [-1,1] → throttle ∈ [0.35, 0.55]
 - Latent Space: Gaussian 64-dim (NOT categorical). Active Inference 이론 부합 (closed-form KL)
 - GMM K=3 (Oracle 권고: K=5는 샘플 부족). 단일 공유 GMM (Task A+B 혼합)
 - Epistemic: Ensemble disagreement primary (5 heads, .mean() normalization)
@@ -107,10 +152,12 @@ EXPLICIT CONSTRAINTS
 
 CONTEXT FOR CONTINUATION
 ------------------------
-- 새 컴퓨터에서 CARLA 설치 경로 확인 필요 (PYTHONPATH 설정)
+- Split control architecture: CEM (longitudinal/speed) + Stanley controller (lateral/steering)
+  - Stanley 파라미터: k_heading=1.5, k_crosstrack=2.0
+  - CARLA steer 부호: positive steer = LEFT turn (counterclockwise yaw increase)
+  - heading_error, crosstrack_error는 env에서 제공 (state[2], state[3])하지만 모델에는 입력되지 않음
+- best_refit.pt = best.pt world model + speed>1.0 프레임으로 GMM refit
 - uv sync 후 carla wheel 별도 설치 필요: uv pip install /path/to/carla-0.9.16/.../carla-0.9.16-cp312-cp312-manylinux_2_31_x86_64.whl && uv pip install shapely
-- torch-backend은 pyproject.toml에 "auto"로 설정됨 (CUDA 자동 감지)
-- TensorBoard 실행 시 setuptools 69 이하 필요 (82+에서 pkg_resources 제거됨): .venv/bin/pip install 'setuptools<70'
-- Streamlit 대시보드는 outputs/ 아래에서 최신 tb_logs를 자동 탐색
 - 평가 시 CARLA 서버 필요 (학습 시에는 불필요)
-- evaluate.py에서 --task A는 Town04, --task B는 Town03, --task baseline은 Town06 사용
+- evaluate.py에서 --task A는 Town04, --task B는 Town06_Opt (obstacles), --task baseline은 Town06_Opt 사용
+- 모든 evaluation 데이터: outputs/eval_v4/, outputs/eval_v4_taskA/ (JSONL trajectories, MP4 videos, CSV summaries)

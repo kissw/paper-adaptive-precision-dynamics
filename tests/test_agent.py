@@ -59,13 +59,24 @@ def test_update_reduces_loss():
 
 
 def test_action_to_carla():
+    # Linear remap: accel ∈ [-1,1] → throttle ∈ [0.35, 0.55]
+    # Formula: throttle = 0.35 + 0.2 * (accel + 1) / 2
+
+    # accel=0.7 → 0.35 + 0.2 * 1.7/2 = 0.52
     action = torch.tensor([0.5, 0.7])
     s, t, b = DeepAIFAgent.action_to_carla(action)
     assert abs(s - 0.5) < 1e-5
-    assert abs(t - 0.7) < 1e-5
+    assert abs(t - 0.52) < 1e-5
     assert abs(b - 0.0) < 1e-5
 
-    action_neg = torch.tensor([-0.3, -0.4])
+    # accel=-1.0 → min_throttle=0.35
+    action_neg = torch.tensor([-0.3, -1.0])
     s, t, b = DeepAIFAgent.action_to_carla(action_neg)
-    assert abs(t - 0.0) < 1e-5
-    assert abs(b - 0.4) < 1e-5
+    assert abs(t - 0.35) < 1e-5
+    assert abs(b - 0.0) < 1e-5
+
+    # accel=0.0 → midpoint=0.45
+    action_zero = torch.tensor([0.0, 0.0])
+    s, t, b = DeepAIFAgent.action_to_carla(action_zero)
+    assert abs(t - 0.45) < 1e-5
+    assert abs(b - 0.0) < 1e-5

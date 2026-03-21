@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import torch
 from torch import Tensor
+
+
+class PlanResult(NamedTuple):
+    action: Tensor  # [action_dim]
+    efe_score: float  # best trajectory EFE
+    epistemic_score: float  # best trajectory epistemic
 
 
 def colored_noise(shape: tuple[int, int, int], beta: float = 1.0) -> Tensor:
@@ -27,6 +35,7 @@ class iCEMPlanner:
         n_iters: int = 3,
         colored_noise_beta: float = 1.0,
         warm_start: bool = True,
+        accel_prior: float = 0.3,
     ):
         self._action_dim = action_dim
         self._horizon = horizon
@@ -35,13 +44,14 @@ class iCEMPlanner:
         self._n_iters = n_iters
         self._beta = colored_noise_beta
         self._warm_start = warm_start
+        self._accel_prior = accel_prior
         self._prev_mean: Tensor | None = None
 
     def reset(self):
         self._prev_mean = None
 
     @torch.no_grad()
-    def plan(self, initial_state, rssm, efe_scorer, pref_model, ensemble) -> Tensor:
+    def plan(self, initial_state, rssm, efe_scorer, pref_model, ensemble) -> PlanResult:
         device = initial_state.deter.device
 
         if self._warm_start and self._prev_mean is not None:
@@ -49,6 +59,10 @@ class iCEMPlanner:
             mean[:-1] = self._prev_mean[1:]
         else:
             mean = torch.zeros(self._horizon, self._action_dim, device=device)
+            # Acceleration prior: break cold-start symmetry so CEM can
+            # differentiate moving vs stopped trajectories.
+            if self._accel_prior != 0.0 and self._action_dim >= 2:
+                mean[:, 1] = self._accel_prior
         std = torch.ones(self._horizon, self._action_dim, device=device)
 
         for _ in range(self._n_iters):
@@ -74,4 +88,22 @@ class iCEMPlanner:
             std = elite_actions.std(dim=0) + 1e-5
 
         self._prev_mean = mean.detach()
-        return mean[0].clamp(-1.0, 1.0)
+
+        # Score the elite mean trajectory (1 sample) to extract EFE/epistemic
+        elite_mean_actions = mean.unsqueeze(0).clamp(-1.0, 1.0)  # [1, H, A]
+        expanded_one = type(initial_state)(*[x[:1] for x in initial_state])
+        traj_one = rssm.imagine(expanded_one, elite_mean_actions.permute(1, 0, 2))
+        feats_one = [rssm.get_feat(s) for s in traj_one]
+        means_one = [s.mean for s in traj_one]
+        stds_one = [s.std for s in traj_one]
+
+        efe_total = efe_scorer.score(feats_one, means_one, stds_one, pref_model, ensemble)
+        epistemic_total = sum(
+            ensemble.epistemic_uncertainty(f).item() for f in feats_one
+        )
+
+        return PlanResult(
+            action=mean[0].clamp(-1.0, 1.0),
+            efe_score=float(efe_total.item()),
+            epistemic_score=float(epistemic_total),
+        )
