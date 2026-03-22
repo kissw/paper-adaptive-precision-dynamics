@@ -40,6 +40,10 @@ cem:
   warm_start: true
   action_dim: 2
   noise_scale: [0.8, 0.6]
+  accel_prior: 0.3
+  cold_start_extra_iters: 5
+  min_std: 0.1
+  keep_fraction: 0.2
 
 preference:
   K: 5
@@ -53,7 +57,7 @@ preference:
 efe:
   beta_instrumental: 1.0
   beta_epistemic: 0.1
-  beta_state: 0.3
+  beta_state: 0.5
   mc_samples: 32
   temporal_discount: 0.95
 

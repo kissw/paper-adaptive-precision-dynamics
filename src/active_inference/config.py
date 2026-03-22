@@ -54,6 +54,10 @@ class CEMConfig:
     warm_start: bool = True
     action_dim: int = 2
     noise_scale: list[float] | None = None
+    accel_prior: float = 0.3
+    cold_start_extra_iters: int = 5
+    min_std: float = 0.1
+    keep_fraction: float = 0.1
 
 
 @dataclass

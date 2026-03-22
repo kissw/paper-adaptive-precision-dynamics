@@ -66,6 +66,10 @@ class DeepAIFAgent:
             colored_noise_beta=cfg.cem.colored_noise_beta,
             warm_start=cfg.cem.warm_start,
             noise_scale=cfg.cem.noise_scale,
+            accel_prior=cfg.cem.accel_prior,
+            cold_start_extra_iters=cfg.cem.cold_start_extra_iters,
+            min_std=cfg.cem.min_std,
+            keep_fraction=cfg.cem.keep_fraction,
         )
         self.efe_scorer = EFEScorer(
             beta_instrumental=cfg.efe.beta_instrumental,

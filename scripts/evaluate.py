@@ -15,7 +15,7 @@ STUCK_SPEED_THRESHOLD = 0.3
 STUCK_FRAMES_LIMIT = 100
 COLLISION_STUCK_FRAMES = 60
 GOAL_DISTANCE_THRESHOLD = 10.0
-MAX_FRAMES = 2000
+MAX_FRAMES = 6000
 
 
 def _distance(loc_a, loc_b):
@@ -95,6 +95,34 @@ def main():
     results = []
     obstacle_actors = []
 
+    fieldnames = [
+        "task",
+        "town",
+        "episode",
+        "route_id",
+        "route_desc",
+        "success",
+        "route_completion_pct",
+        "max_route_completion_pct",
+        "mean_lateral_dev",
+        "offroad_events",
+        "frames",
+        "goal_distance",
+        "min_goal_distance",
+        "termination",
+        "mean_efe_score",
+        "mean_epistemic_score",
+        "trajectory_file",
+    ]
+
+    def _save_results():
+        if not results:
+            return
+        with open(csv_path, "w", newline="") as _f:
+            _w = csv.DictWriter(_f, fieldnames=fieldnames)
+            _w.writeheader()
+            _w.writerows(results)
+
     try:
         for ri, route in enumerate(routes):
             spawns = env._world.get_map().get_spawn_points()
@@ -103,6 +131,7 @@ def main():
             route_wps = get_route_waypoints(client, town, route)
 
             for ep in range(args.episodes):
+              try:
                 # Clean up any previous obstacles
                 destroy_obstacles(obstacle_actors)
 
@@ -280,33 +309,30 @@ def main():
                         vp = output_dir / f"eval_{args.task}_r{ri}_ep{ep}_chase.mp4"
                         imageio.mimwrite(str(vp), chase_frames, fps=20)
 
+                # Save results incrementally after each episode
+                _save_results()
+
+              except Exception as e:
+                print(f"Route {ri} Ep {ep + 1}: CARLA error - {e}")
+                # Try to reconnect
+                try:
+                    env.close()
+                except Exception:
+                    pass
+                import time
+                time.sleep(5)
+                try:
+                    env = CARLADrivingEnv(host=args.host, port=args.port, town=town)
+                except Exception as e2:
+                    print(f"  Failed to reconnect: {e2}")
+                    break
+                continue
+
     finally:
         destroy_obstacles(obstacle_actors)
         env.close()
 
-    fieldnames = [
-        "task",
-        "town",
-        "episode",
-        "route_id",
-        "route_desc",
-        "success",
-        "route_completion_pct",
-        "max_route_completion_pct",
-        "mean_lateral_dev",
-        "offroad_events",
-        "frames",
-        "goal_distance",
-        "min_goal_distance",
-        "termination",
-        "mean_efe_score",
-        "mean_epistemic_score",
-        "trajectory_file",
-    ]
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
+    _save_results()
 
     if results:
         sr = sum(r["success"] for r in results) / len(results)

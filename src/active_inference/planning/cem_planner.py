@@ -37,6 +37,9 @@ class iCEMPlanner:
         warm_start: bool = True,
         accel_prior: float = 0.3,
         noise_scale: list[float] | None = None,
+        cold_start_extra_iters: int = 5,
+        min_std: float = 0.1,
+        keep_fraction: float = 0.1,
     ):
         self._action_dim = action_dim
         self._horizon = horizon
@@ -47,6 +50,9 @@ class iCEMPlanner:
         self._warm_start = warm_start
         self._accel_prior = accel_prior
         self._noise_scale = torch.tensor(noise_scale) if noise_scale is not None else None
+        self._cold_start_extra_iters = cold_start_extra_iters
+        self._min_std = min_std
+        self._keep_fraction = keep_fraction
         self._prev_mean: Tensor | None = None
 
     def reset(self):
@@ -67,16 +73,37 @@ class iCEMPlanner:
                 mean[:, 1] = self._accel_prior
         std = torch.ones(self._horizon, self._action_dim, device=device)
 
-        for _ in range(self._n_iters):
+        # Cold-start: use extra iterations when no warm-start prior exists.
+        # More CEM iterations help find the good action basin from scratch.
+        is_cold = not (self._warm_start and self._prev_mean is not None)
+        iters = self._n_iters + (self._cold_start_extra_iters if is_cold else 0)
+
+        # Cold-start: use more samples to better cover the action space
+        n_total = self._n_samples * 2 if is_cold else self._n_samples
+        n_keep = max(1, int(n_total * self._keep_fraction))
+        n_from_dist = n_total - n_keep
+
+        for _ in range(iters):
+            # Main population from elite distribution
             noise = colored_noise(
-                (self._n_samples, self._horizon, self._action_dim), self._beta
+                (n_from_dist, self._horizon, self._action_dim), self._beta
             ).to(device)
             if self._noise_scale is not None:
                 noise = noise * self._noise_scale.to(device)
-            actions = (mean.unsqueeze(0) + std.unsqueeze(0) * noise).clamp(-1.0, 1.0)
+            dist_actions = (mean.unsqueeze(0) + std.unsqueeze(0) * noise).clamp(-1.0, 1.0)
+
+            # Population injection: random samples to prevent variance collapse
+            rand_noise = colored_noise(
+                (n_keep, self._horizon, self._action_dim), self._beta
+            ).to(device)
+            if self._noise_scale is not None:
+                rand_noise = rand_noise * self._noise_scale.to(device)
+            rand_actions = rand_noise.clamp(-1.0, 1.0)
+
+            actions = torch.cat([dist_actions, rand_actions], dim=0)
 
             # Batch-parallel rollout: expand initial state to N samples
-            expanded = type(initial_state)(*[x.expand(self._n_samples, -1) for x in initial_state])
+            expanded = type(initial_state)(*[x.expand(n_total, -1) for x in initial_state])
             # actions [N, H, A] -> [H, N, A]
             trajectory = rssm.imagine(expanded, actions.permute(1, 0, 2))
 
@@ -89,7 +116,7 @@ class iCEMPlanner:
             elite_idxs = scores.argsort()[: self._n_elites]
             elite_actions = actions[elite_idxs]
             mean = elite_actions.mean(dim=0)
-            std = elite_actions.std(dim=0) + 1e-5
+            std = elite_actions.std(dim=0).clamp(min=self._min_std)
 
         self._prev_mean = mean.detach()
 
