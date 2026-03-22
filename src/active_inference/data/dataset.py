@@ -6,12 +6,15 @@ from torch.utils.data import Dataset, DataLoader
 
 class SequenceDataset(Dataset):
     def __init__(self, h5_path: str, seq_len: int = 50):
-        self.h5_path = h5_path
         self.seq_len = seq_len
 
         with h5py.File(h5_path, "r") as f:
             self.total_samples = len(f["episode_ids"])
             self.episode_ids = f["episode_ids"][:]
+            # Preload all data into memory for fast access
+            self._images = torch.from_numpy(f["images"][:])
+            self._states = torch.from_numpy(f["states"][:])
+            self._actions = torch.from_numpy(f["actions"][:])
 
         self.valid_starts = []
         for i in range(self.total_samples - seq_len + 1):
@@ -24,13 +27,7 @@ class SequenceDataset(Dataset):
     def __getitem__(self, idx):
         start = self.valid_starts[idx]
         end = start + self.seq_len
-
-        with h5py.File(self.h5_path, "r") as f:
-            images = torch.from_numpy(f["images"][start:end])
-            states = torch.from_numpy(f["states"][start:end])
-            actions = torch.from_numpy(f["actions"][start:end])
-
-        return images, states, actions
+        return self._images[start:end], self._states[start:end], self._actions[start:end]
 
 
 class PreferenceSequenceDataset(Dataset):
@@ -41,12 +38,15 @@ class PreferenceSequenceDataset(Dataset):
         task_filter: int | None = None,
         success_only: bool = True,
     ):
-        self.h5_path = h5_path
         self.seq_len = seq_len
 
         with h5py.File(h5_path, "r") as f:
             self.total_samples = len(f["episode_ids"])
             episode_ids = f["episode_ids"][:]
+            # Preload all data into memory
+            self._images = torch.from_numpy(f["images"][:])
+            self._states = torch.from_numpy(f["states"][:])
+            self._actions = torch.from_numpy(f["actions"][:])
 
             has_success = "success_flags" in f
             has_task = "task_labels" in f
@@ -77,13 +77,7 @@ class PreferenceSequenceDataset(Dataset):
     def __getitem__(self, idx):
         start = self.valid_starts[idx]
         end = start + self.seq_len
-
-        with h5py.File(self.h5_path, "r") as f:
-            images = torch.from_numpy(f["images"][start:end])
-            states = torch.from_numpy(f["states"][start:end])
-            actions = torch.from_numpy(f["actions"][start:end])
-
-        return images, states, actions
+        return self._images[start:end], self._states[start:end], self._actions[start:end]
 
 
 def get_dataloader(

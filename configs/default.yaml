@@ -18,7 +18,7 @@ encoder:
 training:
   lr: 1.0e-4
   epochs: 50
-  batch_size: 32
+  batch_size: 64
   seq_len: 50
   bptt_window: 50
   grad_clip: 100.0

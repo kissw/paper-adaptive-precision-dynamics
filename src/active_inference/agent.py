@@ -74,6 +74,8 @@ class DeepAIFAgent:
         )
 
         self._optimizer = torch.optim.Adam(self.world_model.parameters(), lr=cfg.training.lr)
+        self._use_amp = "cuda" in str(self._device)
+        self._scaler = torch.amp.GradScaler("cuda") if self._use_amp else None
         self._prev_state: RSSMState | None = None
         self._prev_action: Tensor | None = None
 
@@ -119,7 +121,7 @@ class DeepAIFAgent:
         return self.step_with_info(obs_img, obs_state).action
 
     def update(self, images: Tensor, states: Tensor, actions: Tensor) -> dict[str, float]:
-        # Per-timestep backward with NaN guard and CUDA error recovery
+        # Per-timestep backward with NaN guard, AMP, and CUDA error recovery
         B, T = images.shape[0], images.shape[1]
         wm = self.world_model
         cfg = self._cfg.training
@@ -136,26 +138,27 @@ class DeepAIFAgent:
             st_t = states[:, t].to(self._device)
             act_t = actions[:, t].to(self._device) if t > 0 else prev_action
 
-            embed = wm.encoder(img_t, st_t)
-            post, prior = wm.rssm.obs_step(prev_state, prev_action, embed)
+            with torch.amp.autocast("cuda", enabled=self._use_amp):
+                embed = wm.encoder(img_t, st_t)
+                post, prior = wm.rssm.obs_step(prev_state, prev_action, embed)
 
-            feat = wm.rssm.get_feat(post)
-            recon_img = wm.obs_decoder(feat)
-            recon_state = wm.state_decoder(feat)
+                feat = wm.rssm.get_feat(post)
+                recon_img = wm.obs_decoder(feat)
+                recon_state = wm.state_decoder(feat)
 
-            loss, info = compute_vfe(
-                post.mean,
-                post.std,
-                prior.mean,
-                prior.std,
-                img_t,
-                recon_img,
-                st_t,
-                recon_state,
-                free_nats=cfg.free_nats,
-                kl_dyn_scale=cfg.kl_dyn_scale,
-                kl_rep_scale=cfg.kl_rep_scale,
-            )
+                loss, info = compute_vfe(
+                    post.mean,
+                    post.std,
+                    prior.mean,
+                    prior.std,
+                    img_t,
+                    recon_img,
+                    st_t,
+                    recon_state,
+                    free_nats=cfg.free_nats,
+                    kl_dyn_scale=cfg.kl_dyn_scale,
+                    kl_rep_scale=cfg.kl_rep_scale,
+                )
 
             # NaN guard: skip this timestep if loss is bad
             if torch.isnan(loss) or torch.isinf(loss):
@@ -163,7 +166,11 @@ class DeepAIFAgent:
                 prev_action = act_t.detach() if t > 0 else prev_action
                 continue
 
-            (loss / T).backward()
+            scaled_loss = loss / T
+            if self._scaler is not None:
+                self._scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
             total_loss_value += loss.item() / T
 
             for k in accum:
@@ -172,8 +179,14 @@ class DeepAIFAgent:
             prev_state = RSSMState(*[x.detach() for x in post])
             prev_action = act_t.detach() if t > 0 else prev_action
 
-        nn.utils.clip_grad_norm_(wm.parameters(), cfg.grad_clip)
-        self._optimizer.step()
+        if self._scaler is not None:
+            self._scaler.unscale_(self._optimizer)
+            nn.utils.clip_grad_norm_(wm.parameters(), cfg.grad_clip)
+            self._scaler.step(self._optimizer)
+            self._scaler.update()
+        else:
+            nn.utils.clip_grad_norm_(wm.parameters(), cfg.grad_clip)
+            self._optimizer.step()
 
         return {k: v / T for k, v in accum.items()} | {"total_loss": total_loss_value}
 
