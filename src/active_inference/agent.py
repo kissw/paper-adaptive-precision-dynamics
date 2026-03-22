@@ -71,6 +71,7 @@ class DeepAIFAgent:
             beta_instrumental=cfg.efe.beta_instrumental,
             beta_epistemic=cfg.efe.beta_epistemic,
             mc_samples=cfg.efe.mc_samples,
+            temporal_discount=cfg.efe.temporal_discount,
         )
 
         self._optimizer = torch.optim.Adam(self.world_model.parameters(), lr=cfg.training.lr)

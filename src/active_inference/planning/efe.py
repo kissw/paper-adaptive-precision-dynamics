@@ -12,10 +12,12 @@ class EFEScorer:
         beta_instrumental: float = 1.0,
         beta_epistemic: float = 0.1,
         mc_samples: int = 32,
+        temporal_discount: float = 0.95,
     ):
         self._beta_i = beta_instrumental
         self._beta_e = beta_epistemic
         self._mc_samples = mc_samples
+        self._gamma = temporal_discount
 
     def instrumental_value(
         self, q_mean: Tensor, q_std: Tensor, pref_model: PreferenceModel
@@ -54,9 +56,20 @@ class EFEScorer:
         # trajectory_means: list of [B, stoch_dim]
         # trajectory_stds: list of [B, stoch_dim]
         # Returns: [B] total EFE (lower = better)
-        total = torch.zeros(trajectory_feats[0].shape[0], device=trajectory_feats[0].device)
-        for feat, mean, std in zip(trajectory_feats, trajectory_means, trajectory_stds):
+        B = trajectory_feats[0].shape[0]
+        device = trajectory_feats[0].device
+        total = torch.zeros(B, device=device)
+        for t, (feat, mean, std) in enumerate(
+            zip(trajectory_feats, trajectory_means, trajectory_stds)
+        ):
             instr = self.instrumental_value(mean, std, pref_model)
             epist = self.epistemic_value_ensemble(ensemble, feat)
-            total = total + self._beta_i * instr - self._beta_e * epist
+            # Per-timestep normalization: z-score across batch so relative
+            # differences matter regardless of absolute magnitude.
+            # Only normalize with sufficient samples (CEM uses B=500).
+            if B > 4:
+                instr = (instr - instr.mean().detach()) / (instr.std().detach() + 1e-8)
+                epist = (epist - epist.mean().detach()) / (epist.std().detach() + 1e-8)
+            discount = self._gamma ** t
+            total = total + discount * (self._beta_i * instr - self._beta_e * epist)
         return total

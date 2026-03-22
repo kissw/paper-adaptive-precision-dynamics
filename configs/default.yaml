@@ -32,14 +32,14 @@ ensemble:
   hidden_dim: 256
 
 cem:
-  horizon: 25
+  horizon: 10
   n_samples: 500
   n_elites: 50
   n_iters: 5
   colored_noise_beta: 1.0
   warm_start: true
   action_dim: 2
-  noise_scale: [1.5, 1.0]
+  noise_scale: [0.8, 0.6]
 
 preference:
   K: 5
@@ -54,6 +54,7 @@ efe:
   beta_instrumental: 1.0
   beta_epistemic: 0.1
   mc_samples: 32
+  temporal_discount: 0.95
 
 evaluation:
   episodes: 5

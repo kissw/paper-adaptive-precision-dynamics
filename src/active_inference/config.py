@@ -75,6 +75,7 @@ class EFEConfig:
     beta_instrumental: float = 1.0
     beta_epistemic: float = 0.1
     mc_samples: int = 32
+    temporal_discount: float = 0.95
 
 
 @dataclass
