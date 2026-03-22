@@ -53,6 +53,7 @@ preference:
 efe:
   beta_instrumental: 1.0
   beta_epistemic: 0.1
+  beta_state: 0.3
   mc_samples: 32
   temporal_discount: 0.95
 

@@ -53,7 +53,7 @@ class iCEMPlanner:
         self._prev_mean = None
 
     @torch.no_grad()
-    def plan(self, initial_state, rssm, efe_scorer, pref_model, ensemble) -> PlanResult:
+    def plan(self, initial_state, rssm, efe_scorer, pref_model, ensemble, state_decoder=None) -> PlanResult:
         device = initial_state.deter.device
 
         if self._warm_start and self._prev_mean is not None:
@@ -84,7 +84,7 @@ class iCEMPlanner:
             means_list = [s.mean for s in trajectory]
             stds_list = [s.std for s in trajectory]
 
-            scores = efe_scorer.score(feats, means_list, stds_list, pref_model, ensemble)
+            scores = efe_scorer.score(feats, means_list, stds_list, pref_model, ensemble, state_decoder)
 
             elite_idxs = scores.argsort()[: self._n_elites]
             elite_actions = actions[elite_idxs]
@@ -101,7 +101,7 @@ class iCEMPlanner:
         means_one = [s.mean for s in traj_one]
         stds_one = [s.std for s in traj_one]
 
-        efe_total = efe_scorer.score(feats_one, means_one, stds_one, pref_model, ensemble)
+        efe_total = efe_scorer.score(feats_one, means_one, stds_one, pref_model, ensemble, state_decoder)
         epistemic_total = sum(
             ensemble.epistemic_uncertainty(f).item() for f in feats_one
         )

@@ -70,6 +70,7 @@ class DeepAIFAgent:
         self.efe_scorer = EFEScorer(
             beta_instrumental=cfg.efe.beta_instrumental,
             beta_epistemic=cfg.efe.beta_epistemic,
+            beta_state=cfg.efe.beta_state,
             mc_samples=cfg.efe.mc_samples,
             temporal_discount=cfg.efe.temporal_discount,
         )
@@ -111,6 +112,7 @@ class DeepAIFAgent:
             self.efe_scorer,
             self.preference,
             self.world_model.ensemble,
+            self.world_model.state_decoder,
         )
 
         self._prev_state = post
