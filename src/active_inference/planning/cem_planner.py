@@ -54,9 +54,40 @@ class iCEMPlanner:
         self._min_std = min_std
         self._keep_fraction = keep_fraction
         self._prev_mean: Tensor | None = None
+        self._adaptive_min_std = min_std
 
     def reset(self):
         self._prev_mean = None
+        self._adaptive_min_std = self._min_std
+
+    def set_state_context(
+        self,
+        heading_error: float,
+        crosstrack_error: float,
+        state_error: float,
+    ):
+        """Adapt exploration and action prior from observed state error.
+
+        Two AIF mechanisms:
+        1. Precision-weighting: high prediction error reduces precision
+           on the action prior, widening exploration (wider min_std).
+        2. Corrective action prior: heading/crosstrack error sets an
+           informed prior on steering (proprioceptive reflex). The CEM
+           optimizes around this prior rather than the warm-start mean.
+        """
+        self._heading_error = heading_error
+        self._crosstrack_error = crosstrack_error
+        self._state_error = state_error
+
+        # Exploration widening
+        if state_error > 1.0:
+            self._adaptive_min_std = self._min_std * 3.0
+            self._prev_mean = None
+        elif state_error > 0.3:
+            boost = 1.0 + 2.0 * (state_error - 0.3) / 0.7
+            self._adaptive_min_std = self._min_std * boost
+        else:
+            self._adaptive_min_std = self._min_std
 
     @torch.no_grad()
     def plan(self, initial_state, rssm, efe_scorer, pref_model, ensemble, state_decoder=None) -> PlanResult:
@@ -116,7 +147,7 @@ class iCEMPlanner:
             elite_idxs = scores.argsort()[: self._n_elites]
             elite_actions = actions[elite_idxs]
             mean = elite_actions.mean(dim=0)
-            std = elite_actions.std(dim=0).clamp(min=self._min_std)
+            std = elite_actions.std(dim=0).clamp(min=self._adaptive_min_std)
 
         self._prev_mean = mean.detach()
 

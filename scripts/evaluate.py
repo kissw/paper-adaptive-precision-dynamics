@@ -231,6 +231,8 @@ def main():
                             "yaw": round(vehicle_yaw, 4),
                             "speed_mps": round(float(state[0]), 4),
                             "steer": round(float(state[1]), 4),
+                            "heading_error": round(float(state[2]), 4),
+                            "crosstrack_error": round(float(state[3]), 4),
                             "action_steer": round(float(action[0]), 4),
                             "action_accel": round(float(action[1]), 4),
                             "lateral_dev": round(lat_dev, 4),

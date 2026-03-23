@@ -110,6 +110,26 @@ class DeepAIFAgent:
         embed = self.world_model.encoder(img, st)
         post, _ = self.world_model.rssm.obs_step(self._prev_state, self._prev_action, embed)
 
+        # AIF precision-weighting: observed state error modulates
+        # both action prior precision and EFE channel weights.
+        # High error → wider exploration + trust state decoder over preference.
+        heading_err = float(st[0, 2]) if st.dim() == 2 else float(st[2])
+        crosstrack_err = float(st[0, 3]) if st.dim() == 2 else float(st[3])
+        state_error = heading_err ** 2 + crosstrack_err ** 2
+        self.planner.set_state_context(heading_err, crosstrack_err, state_error)
+
+        # Adaptive EFE precision: when state error is high, the preference
+        # model operates on OOD latents (it was trained on centered driving).
+        # Increase state penalty weight (direct observation, reliable) and
+        # decrease preference weight (model-based, unreliable at OOD states).
+        if state_error > 0.3:
+            boost = min(4.0, 1.0 + (state_error - 0.3) * 4.0)
+            self.efe_scorer._beta_s = self._cfg.efe.beta_state * boost
+            self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental / boost
+        else:
+            self.efe_scorer._beta_s = self._cfg.efe.beta_state
+            self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental
+
         plan_result = self.planner.plan(
             post,
             self.world_model.rssm,

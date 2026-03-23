@@ -18,6 +18,7 @@ EVAL_ROUTES: dict[str, list[dict[str, Any]]] = {
     "Town04": [
         {"start": 0, "goal": 53, "desc": "Highway curves 765m 21turns"},
         {"start": 0, "goal": 54, "desc": "Highway curves 760m 21turns"},
+        {"start": 0, "goal": 30, "desc": "Highway moderate curves 378m 0turns"},
     ],
     "Town06_Opt": [
         {"start": 0, "goal": 1, "desc": "Highway baseline 1332m 85turns"},
