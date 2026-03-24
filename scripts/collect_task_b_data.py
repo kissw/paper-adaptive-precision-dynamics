@@ -228,7 +228,8 @@ def main():
                 if agent.done():
                     break
 
-            # Destroy obstacles at end of episode
+            # Record obstacle count before destroying (destroy clears the list)
+            num_obstacles_spawned = len(obstacle_actors)
             destroy_obstacles(obstacle_actors)
 
             ep_end = collected
@@ -268,7 +269,7 @@ def main():
             print(
                 f"Ep {episode_idx:4d} [{tier:6s}] spd={target_speed_kmh:4.0f}km/h | "
                 f"{ep_frames:4d}fr col={ep_collisions} lc={lane_changes} "
-                f"status={status} obs={len(obstacle_actors)} | "
+                f"status={status} obs={num_obstacles_spawned} | "
                 f"{collected}/{args.num_samples}"
             )
 
