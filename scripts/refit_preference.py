@@ -56,22 +56,29 @@ def main():
 
     cfg = Config.from_yaml(args.config)
 
-    # Override GMM K if specified
-    if args.K is not None:
-        cfg.preference.K = args.K
-        print(f"Overriding GMM K={args.K}")
+    # Determine target K for refitting
+    target_K = args.K if args.K is not None else cfg.preference.K
 
+    # Probe checkpoint to get its preference K (may differ from config)
+    ckpt_peek = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    ckpt_K = ckpt_peek["preference"]["means"].shape[0]
+    del ckpt_peek
+
+    # Build agent with checkpoint's K so load_checkpoint succeeds
+    cfg.preference.K = ckpt_K
     agent = DeepAIFAgent(cfg)
     agent.load_checkpoint(args.checkpoint)
 
-    # If K was overridden, reinitialize preference with new K
-    if args.K is not None:
-        from active_inference.training.preference import PreferenceModel
-        agent.preference = PreferenceModel(
-            K=args.K,
-            latent_dim=cfg.rssm.stoch_dim,
-            min_std=cfg.preference.min_std,
-        ).to(agent._device)
+    # Reinitialize preference with target K for refitting
+    if target_K != ckpt_K:
+        print(f"Overriding GMM K: {ckpt_K} (checkpoint) -> {target_K} (target)")
+    from active_inference.training.preference import PreferenceModel
+    cfg.preference.K = target_K
+    agent.preference = PreferenceModel(
+        K=target_K,
+        latent_dim=cfg.rssm.stoch_dim,
+        min_std=cfg.preference.min_std,
+    ).to(agent._device)
 
     device = agent._device
     wm = agent.world_model
