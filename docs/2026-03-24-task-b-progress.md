@@ -26,39 +26,35 @@ Files changed:
 
 Commit: `a7bd0b2` — 72/72 tests pass.
 
-### Stage 2: Task B Data Collection (IN PROGRESS)
+### Stage 2: Task B Data Collection (DONE)
 
-- Target: ~15K frames of lane-change demonstrations
-- Town: Town06 (multi-lane highway)
-- Agent: BehaviorAgent(aggressive) or BasicAgent fallback
-- Obstacles: 3 per episode at [40, 90, 140] waypoint steps
-- Speed: 20-40 km/h
-- Noise tiers: clean(30%), medium(40%), high(30%)
+- 15,000 frames collected across 36 episodes
+- Agent: BehaviorAgent(aggressive) — reliable lane changes
+- 80.6% of episodes contained lane changes (29/36)
+- 38.9% success rate (14/36 — collision-free with lane changes)
+- 88.1% of frames labeled as Task B (lane-change episodes)
+- Tier distribution: clean=15, medium=11, high=10
 - Output: `data/task_b_lanechange.h5`
 
-### Stage 3: Merge Datasets (PENDING)
+### Stage 3: Merge Datasets (DONE)
 
-```bash
-uv run python scripts/merge_data.py \
-    data/expert_data_mixed.h5 data/task_b_lanechange.h5 \
-    --output data/expert_data_v6_combined.h5
-```
+Combined 96,000 + 15,000 = 111,000 frames → `data/expert_data_v6_combined.h5`
 
-Expected: ~96K + ~15K = ~111K frames.
-
-### Stage 4: Train Shared World Model (PENDING)
+### Stage 4: Train Shared World Model (IN PROGRESS)
 
 ```bash
 uv run python scripts/train.py \
     --config configs/default.yaml \
     --data data/expert_data_v6_combined.h5 \
     --output_dir outputs/train_v6_combined \
+    --resume outputs/train_v5_finetune/checkpoints/best.pt \
     --epochs 20
 ```
 
-Fine-tuning from existing mixed-data checkpoint.
+Fine-tuning from existing mixed-data checkpoint. Epoch 1 loss: 1.5164.
+Estimated completion: ~5.5 hours from start (~17 min/epoch × 20 epochs).
 
-### Stage 5: Refit Task B Preference (PENDING)
+### Stage 5: Refit Task B Preference (PENDING — automated)
 
 ```bash
 uv run python scripts/refit_preference.py \
@@ -89,6 +85,12 @@ uv run python scripts/evaluate.py \
 | K (GMM) | 5 | 7 | Richer lane-change distribution |
 | accel_prior | 0.3 | 0.2 | Slower obstacle approach |
 | warm_start_reset_threshold | 1.0 | 4.0 | Prevent mid-lane-change reset |
+
+## Bug Fixes Applied
+
+1. **task_b.yaml missing encoder section**: Config defaulted to `state_dim=2` instead of 4, causing `RuntimeError: size mismatch` when loading checkpoint. Fixed by adding `encoder` and `rssm` sections.
+2. **Pipeline `set -e` masked by pipe**: `python ... | tee log` masks Python errors because `set -e` only checks the last pipe command (`tee`). Fixed with `set -eo pipefail`.
+3. **Missing eval output directory**: `tee` failed because `outputs/eval_task_b_v1/` didn't exist. Fixed with `mkdir -p` at script start.
 
 ## Fallback Options
 

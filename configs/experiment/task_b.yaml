@@ -12,6 +12,18 @@
 seed: 42
 device: cuda
 
+encoder:
+  image_channels: 3
+  image_size: 64
+  state_dim: 4
+  crop_road: true
+
+rssm:
+  deter_dim: 256
+  stoch_dim: 64
+  embed_dim: 256
+  min_std: 0.1
+
 cem:
   horizon: 15
   n_samples: 500

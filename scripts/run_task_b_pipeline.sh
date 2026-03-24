@@ -1,13 +1,17 @@
 #!/bin/bash
 # Task B Pipeline: Runs after training completes
 # Stages: Refit Task B preference -> Evaluate Task B -> Generate results
-set -e
+set -eo pipefail
 
 TRAIN_DIR="outputs/train_v6_combined"
 CHECKPOINT="${TRAIN_DIR}/checkpoints/best.pt"
 DATA="data/expert_data_v6_combined.h5"
 EVAL_DIR="outputs/eval_task_b_v1"
+EVAL_A_DIR="outputs/eval_task_a_v6"
 TASKB_PREF="${TRAIN_DIR}/checkpoints/best_taskb_pref.pt"
+
+# Create output directories upfront
+mkdir -p "$EVAL_DIR" "$EVAL_A_DIR" "${TRAIN_DIR}"
 
 echo "=============================================="
 echo "Task B Pipeline"
@@ -62,7 +66,6 @@ echo "  Videos: ${EVAL_DIR}/*.mp4"
 # to ensure no regression
 echo ""
 echo "[4/4] Evaluating Task A (regression check, no video)..."
-EVAL_A_DIR="outputs/eval_task_a_v6"
 uv run python scripts/evaluate.py \
     --task A \
     --checkpoint "$CHECKPOINT" \
