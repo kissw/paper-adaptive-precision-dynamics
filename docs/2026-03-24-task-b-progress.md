@@ -118,10 +118,77 @@ The preference model (GMM) is fit on latent states from lane-change episodes. Th
 3. **Missing eval output directory**: `tee` failed because `outputs/eval_task_b_v1/` didn't exist. Fixed with `mkdir -p` at script start.
 4. **Preference K mismatch on checkpoint load**: Checkpoint has K=5, task_b.yaml has K=7. `load_checkpoint()` failed on size mismatch. Fixed by probing checkpoint K first, building agent with checkpoint K, then reinitializing preference with target K.
 
-## Next Steps (within Active Inference framework)
+## v2 Iteration: heading_only_state=true
 
-- [ ] Enable `heading_only_state: true` — remove crosstrack penalty entirely
-- [ ] Try `beta_state: 0.0` — rely solely on GMM instrumental value
-- [ ] Fit preference on obstacle-approach frames only (filter by proximity to obstacles)
-- [ ] Increase CEM horizon to 20 for earlier obstacle detection in imagination
-- [ ] Add obstacle proximity to the state vector (5D state: speed, steer, heading, crosstrack, obstacle_dist)
+Config: `beta_state=0.2`, `heading_only_state=true` (no crosstrack penalty)
+
+| Route | Episode | Completion | MLD | Obstacles Avoided | Lane Changes | Termination |
+|-------|---------|-----------|------|-------------------|--------------|-------------|
+| 0 | 1 | 44% | 0.848 | 0/2 | 3 | collision_stuck |
+| 0 | 2 | 44% | 0.774 | 0/2 | 3 | collision_stuck |
+| 0 | 3 | 44% | 0.854 | 0/2 | 3 | collision_stuck |
+| 1 | 1 | 77% | 0.868 | 0/3 | 3 | timeout |
+| 1 | 2 | 66% | 0.971 | 0/3 | 6 | timeout |
+| 1 | 3 | 66% | 0.893 | 0/3 | 4 | timeout |
+
+**Summary:** SR=0%, Avg Completion=57.0%, Obstacles Avoided=0/15 (0%), Lane Changes=22
+**Worse than v1** — fewer lane changes (22 vs 99), higher MLD, more offroad events.
+
+## v3 Iteration: beta_state=0.0 (pure GMM preference)
+
+Config: `beta_state=0.0`, `heading_only_state=true` (no state penalty at all)
+
+| Route | Episode | Completion | MLD | Obstacles Avoided | Lane Changes | Termination |
+|-------|---------|-----------|------|-------------------|--------------|-------------|
+| 0 | 1 | 44% | 0.576 | 0/2 | 3 | collision_stuck |
+
+**Partial (killed after confirming same pattern):** Same collision with obstacles, 0 avoidance.
+
+## Analysis: Why Parameter Tuning Fails
+
+All three iterations (v1 beta_state=0.2, v2 heading_only, v3 beta_state=0.0) show **identical failure**: 0 obstacles avoided despite 22-99 lane changes. The root cause is structural, not parametric:
+
+1. **GMM preference is obstacle-blind**: Fit on all lane-change frames, it captures "general lane-change driving" distribution. No discrimination between "near obstacle" and "no obstacle" latent states.
+2. **State decoder has no obstacle signal**: 4D state [speed, steer, heading, crosstrack] contains no obstacle proximity information. EFE penalty cannot reference what the model doesn't predict.
+3. **RSSM imagination can't plan around obstacles**: Without obstacle distance in the decoded state, the CEM planner has no way to prefer "lane change near obstacle" over "lane change elsewhere."
+
+## v4: 5D State Approach (IN PROGRESS)
+
+### Design (stays within AIF framework)
+
+Add `obstacle_distance` as 5th state dimension:
+- **State vector**: [speed, steer, heading_error, crosstrack_error, **obstacle_distance_norm**]
+- **Normalization**: `min(distance_to_nearest_obstacle / 50.0, 1.0)` → 0=at obstacle, 1=far away
+- **EFE penalty**: `beta_obstacle * (1 - decoded_obstacle_dist)^2` — penalizes imagined trajectories near obstacles
+- **Weight surgery**: Load existing 4D checkpoint into 5D model by padding new dimension weights with zeros
+- **Task A compatibility**: Pad Task A data with obstacle_distance=1.0 (no obstacles)
+
+### AIF Justification
+
+This is equivalent to adding a **prior preference for obstacle-free states** in the AIF framework:
+- The state decoder learns to predict obstacle proximity from RSSM features
+- During CEM imagination, decoded obstacle_distance serves as a direct planning signal
+- The obstacle proximity penalty in EFE = negative log-preference for obstacle-near states
+- The agent learns to **prefer** trajectories that keep obstacle distance high
+
+### Implementation
+
+Files changed:
+- `src/active_inference/config.py` — added `beta_obstacle` to EFEConfig
+- `src/active_inference/planning/efe.py` — `obstacle_proximity_penalty()` method + integration in `score()`
+- `src/active_inference/agent.py` — weight surgery in `load_checkpoint()` for state_dim changes, preference K mismatch handling
+- `scripts/collect_task_b_data.py` — compute obstacle_distance per frame, error recovery for CARLA crashes
+- `scripts/evaluate.py` — compute obstacle_distance during eval, augment state to match model state_dim
+- `scripts/merge_data.py` — pad missing state dims with 1.0 (no-obstacle) instead of 0.0
+- `configs/experiment/task_b.yaml` — `state_dim: 5`, `beta_obstacle: 2.0`
+- `scripts/run_task_b_5d_pipeline.sh` — full pipeline script
+
+### Pipeline Status
+
+1. [x] Code implementation (all 72 tests pass)
+2. [ ] Data re-collection with 5D state (~15K frames, in progress)
+3. [ ] Merge datasets (4D Task A padded to 5D + 5D Task B)
+4. [ ] Fine-tune world model (weight surgery from 4D checkpoint, 20 epochs)
+5. [ ] Refit Task B preference (K=7)
+6. [ ] Evaluate Task B obstacle avoidance
+7. [ ] Evaluate Task A regression

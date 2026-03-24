@@ -80,6 +80,7 @@ class EFEConfig:
     beta_instrumental: float = 1.0
     beta_epistemic: float = 0.1
     beta_state: float = 1.0
+    beta_obstacle: float = 0.0
     mc_samples: int = 32
     temporal_discount: float = 0.95
     heading_only_state: bool = False

@@ -188,7 +188,22 @@ def main():
                 traj_fh = open(traj_file, "w")
 
                 try:
+                    state_dim = cfg.encoder.state_dim
+
                     for t in range(args.max_frames):
+                        # Augment state to match model state_dim
+                        if len(state) < state_dim:
+                            # Compute obstacle distance for 5D state
+                            if is_task_b and obstacle_positions:
+                                vx, vy = env._vehicle.get_location().x, env._vehicle.get_location().y
+                                min_d = min(
+                                    math.sqrt((vx - ox)**2 + (vy - oy)**2)
+                                    for ox, oy in obstacle_positions
+                                )
+                                obs_dist_norm = min(min_d / 50.0, 1.0)
+                            else:
+                                obs_dist_norm = 1.0  # No obstacles
+                            state = np.append(state, [obs_dist_norm] * (state_dim - len(state)))
                         img_tensor = torch.tensor(img, dtype=torch.float32)
                         state_tensor = torch.tensor(state, dtype=torch.float32)
                         plan_result = agent.step_with_info(img_tensor, state_tensor)

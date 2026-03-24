@@ -76,6 +76,7 @@ class DeepAIFAgent:
             beta_instrumental=cfg.efe.beta_instrumental,
             beta_epistemic=cfg.efe.beta_epistemic,
             beta_state=cfg.efe.beta_state,
+            beta_obstacle=getattr(cfg.efe, "beta_obstacle", 0.0),
             mc_samples=cfg.efe.mc_samples,
             temporal_discount=cfg.efe.temporal_discount,
             heading_only_state=getattr(cfg.efe, "heading_only_state", False),
@@ -235,12 +236,56 @@ class DeepAIFAgent:
 
     def load_checkpoint(self, path: str | Path):
         ckpt = torch.load(path, map_location=self._device, weights_only=False)
-        self.world_model.load_state_dict(ckpt["world_model"])
-        self._optimizer.load_state_dict(ckpt["optimizer"])
+        surgery_applied = False
+        try:
+            self.world_model.load_state_dict(ckpt["world_model"])
+        except RuntimeError as e:
+            if "size mismatch" in str(e):
+                print(f"State dim mismatch detected, applying weight surgery...")
+                self._load_with_state_dim_surgery(ckpt["world_model"])
+                surgery_applied = True
+            else:
+                raise
+        if surgery_applied:
+            # Optimizer state has old parameter shapes; reinitialize
+            print("  Reinitializing optimizer (parameter shapes changed)")
+            self._optimizer = torch.optim.Adam(
+                self.world_model.parameters(), lr=self._cfg.training.lr
+            )
+        else:
+            self._optimizer.load_state_dict(ckpt["optimizer"])
         pref = ckpt["preference"]
-        self.preference.means.data.copy_(pref["means"])
-        self.preference.log_stds.data.copy_(pref["log_stds"])
-        self.preference.logits.data.copy_(pref["logits"])
+        ckpt_K = pref["means"].shape[0]
+        model_K = self.preference.means.shape[0]
+        if ckpt_K == model_K:
+            self.preference.means.data.copy_(pref["means"])
+            self.preference.log_stds.data.copy_(pref["log_stds"])
+            self.preference.logits.data.copy_(pref["logits"])
+        else:
+            # K mismatch: load what fits, preference will be refit later
+            k = min(ckpt_K, model_K)
+            self.preference.means.data[:k].copy_(pref["means"][:k])
+            self.preference.log_stds.data[:k].copy_(pref["log_stds"][:k])
+            self.preference.logits.data[:k].copy_(pref["logits"][:k])
+            print(f"  Preference K mismatch: {ckpt_K} -> {model_K} (partial load, refit needed)")
+
+    def _load_with_state_dim_surgery(self, ckpt_state_dict: dict):
+        """Load checkpoint with mismatched state_dim by padding new dimensions."""
+        model_sd = self.world_model.state_dict()
+        for key in ckpt_state_dict:
+            ckpt_val = ckpt_state_dict[key]
+            model_val = model_sd[key]
+            if ckpt_val.shape == model_val.shape:
+                model_sd[key] = ckpt_val
+            else:
+                # Pad with zeros for new state dimensions
+                padded = torch.zeros_like(model_val)
+                slices = tuple(slice(0, min(s1, s2)) for s1, s2 in
+                               zip(ckpt_val.shape, model_val.shape))
+                padded[slices] = ckpt_val[slices]
+                model_sd[key] = padded
+                print(f"  Weight surgery: {key} {ckpt_val.shape} -> {model_val.shape}")
+        self.world_model.load_state_dict(model_sd)
 
     @torch.no_grad()
     def encode_preference_data(self, pref_loader, max_samples: int = 3000) -> Tensor:

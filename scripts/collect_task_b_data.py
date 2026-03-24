@@ -129,12 +129,30 @@ def main():
 
     obstacle_actors = []
 
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 5
+
     try:
         while collected < args.num_samples:
             # Clean up previous obstacles
             destroy_obstacles(obstacle_actors)
 
-            obs = env.reset()
+            try:
+                obs = env.reset()
+            except Exception as e:
+                consecutive_errors += 1
+                print(f"CARLA reset error ({consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}): {e}")
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    print("Too many consecutive errors, saving partial data")
+                    break
+                import time; time.sleep(3)
+                try:
+                    env.close()
+                    env = CARLADrivingEnv(host=args.host, port=args.port, town=args.town, image_model_size=args.image_size)
+                except Exception:
+                    pass
+                continue
+            consecutive_errors = 0
             img, state = obs
 
             tier = select_tier(rng)
@@ -171,11 +189,17 @@ def main():
             ep_lat_devs = []
             ep_lane_list = []
 
+            ep_error = False
             for t in range(args.episode_len):
                 if collected >= args.num_samples:
                     break
 
-                control = agent.run_step()
+                try:
+                    control = agent.run_step()
+                except Exception as e:
+                    print(f"  Agent error at frame {t}: {e}")
+                    ep_error = True
+                    break
                 expert_action = carla_to_action(
                     control.steer, control.throttle, control.brake
                 )
@@ -188,11 +212,28 @@ def main():
                 if speed_kmh > target_speed_kmh * 1.1 and expert_action[1] < 0:
                     noisy_action[1] = min(noisy_action[1], expert_action[1])
 
-                obs, info = env.step(noisy_action)
+                try:
+                    obs, info = env.step(noisy_action)
+                except Exception as e:
+                    print(f"  Step error at frame {t}: {e}")
+                    ep_error = True
+                    break
                 img, state = obs
 
+                # Compute normalized distance to nearest obstacle
+                ego_loc = env._vehicle.get_location()
+                min_obs_dist = 100.0
+                for obs_actor in obstacle_actors:
+                    obs_loc = obs_actor.get_location()
+                    d = ((ego_loc.x - obs_loc.x)**2 + (ego_loc.y - obs_loc.y)**2)**0.5
+                    if d < min_obs_dist:
+                        min_obs_dist = d
+                obs_dist_norm = min(min_obs_dist / 50.0, 1.0)
+                # 5D state: [speed, steer, heading_error, crosstrack_error, obstacle_distance]
+                state_5d = np.append(state, obs_dist_norm)
+
                 all_images.append(img)
-                all_states.append(state)
+                all_states.append(state_5d)
                 all_actions.append(noisy_action)
                 all_expert_actions.append(expert_action)
                 all_episode_ids.append(episode_idx)
@@ -227,6 +268,25 @@ def main():
 
                 if agent.done():
                     break
+
+            if ep_error:
+                # Discard frames from this broken episode
+                discard = collected - ep_start
+                if discard > 0:
+                    for lst in [all_images, all_states, all_actions,
+                                all_expert_actions, all_episode_ids,
+                                all_lateral_devs, all_lane_ids, all_noise_sigmas]:
+                        del lst[-discard:]
+                    collected = ep_start
+                print(f"  Discarded {discard} frames from broken episode")
+                destroy_obstacles(obstacle_actors)
+                import time; time.sleep(3)
+                try:
+                    env.close()
+                    env = CARLADrivingEnv(host=args.host, port=args.port, town=args.town, image_model_size=args.image_size)
+                except Exception:
+                    pass
+                continue
 
             # Record obstacle count before destroying (destroy clears the list)
             num_obstacles_spawned = len(obstacle_actors)

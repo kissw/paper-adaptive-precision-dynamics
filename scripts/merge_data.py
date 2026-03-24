@@ -45,14 +45,16 @@ def main():
             total_episodes += eps
 
     # Ensure all state arrays have the same dimension
+    # Pad with 1.0 for obstacle_distance (5th dim): 1.0 = no obstacle nearby
     state_arrays = all_data["states"]
     max_dim = max(s.shape[1] for s in state_arrays)
     padded = []
     for s in state_arrays:
         if s.shape[1] < max_dim:
-            pad = np.zeros((s.shape[0], max_dim - s.shape[1]), dtype=s.dtype)
+            orig_dim = s.shape[1]
+            pad = np.ones((s.shape[0], max_dim - orig_dim), dtype=s.dtype)
             s = np.concatenate([s, pad], axis=1)
-            print(f"  Padded states from {s.shape[1]} to {max_dim}D (zeros for missing dims)")
+            print(f"  Padded states from {orig_dim} to {max_dim}D (1.0 for obstacle_distance)")
         padded.append(s)
     all_data["states"] = padded
 

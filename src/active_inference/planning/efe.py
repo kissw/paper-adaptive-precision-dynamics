@@ -12,6 +12,7 @@ class EFEScorer:
         beta_instrumental: float = 1.0,
         beta_epistemic: float = 0.1,
         beta_state: float = 1.0,
+        beta_obstacle: float = 0.0,
         mc_samples: int = 32,
         temporal_discount: float = 0.95,
         heading_only_state: bool = False,
@@ -19,6 +20,7 @@ class EFEScorer:
         self._beta_i = beta_instrumental
         self._beta_e = beta_epistemic
         self._beta_s = beta_state
+        self._beta_o = beta_obstacle
         self._mc_samples = mc_samples
         self._gamma = temporal_discount
         self._heading_only_state = heading_only_state
@@ -67,6 +69,23 @@ class EFEScorer:
         decoded = state_decoder(feat)  # [B, 4]
         heading_err = decoded[:, 2]
         return heading_err.pow(2).clamp(max=4.0)  # [B]
+
+    def obstacle_proximity_penalty(self, state_decoder, feat: Tensor) -> Tensor:
+        """Obstacle proximity penalty via decoded obstacle distance.
+
+        Decodes imagined features to predicted 5D states where the 5th
+        dimension is normalized obstacle distance (0=at obstacle, 1=far).
+        Penalizes trajectories that predict close obstacle proximity.
+
+        This encodes the AIF prior preference for obstacle-free states:
+        p̃(s) assigns high probability to states with large obstacle distance.
+        """
+        decoded = state_decoder(feat)  # [B, 5]
+        if decoded.shape[-1] < 5:
+            return torch.zeros(feat.shape[0], device=feat.device)
+        obs_dist_norm = decoded[:, 4]  # 0=at obstacle, 1=far away
+        # Penalty = (1 - dist)^2: high when obstacle is close
+        return (1.0 - obs_dist_norm.clamp(0, 1)).pow(2).clamp(max=4.0)
 
     def epistemic_value_ensemble(self, ensemble: EnsembleTransitionHeads, feat: Tensor) -> Tensor:
         return ensemble.epistemic_uncertainty(feat)  # [B]
@@ -123,6 +142,13 @@ class EFEScorer:
                 else:
                     state_instr = self.state_instrumental_value(state_decoder, feat)
                 step_score = step_score + self._beta_s * state_instr
+
+            # Obstacle proximity penalty: penalizes trajectories that
+            # imagine getting close to obstacles. Uses the 5th decoded
+            # state dimension (obstacle_distance_norm).
+            if state_decoder is not None and self._beta_o > 0:
+                obs_penalty = self.obstacle_proximity_penalty(state_decoder, feat)
+                step_score = step_score + self._beta_o * obs_penalty
 
             total = total + discount * step_score
         return total
