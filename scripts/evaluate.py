@@ -64,7 +64,11 @@ def main():
     from active_inference.agent import DeepAIFAgent
     from active_inference.data.carla_env import CARLADrivingEnv
     from active_inference.evaluation.routes import EVAL_ROUTES, get_route_waypoints, validate_routes
-    from active_inference.evaluation.obstacles import spawn_obstacles, destroy_obstacles
+    from active_inference.evaluation.obstacles import (
+        spawn_obstacles,
+        spawn_obstacles_on_route,
+        destroy_obstacles,
+    )
     from active_inference.utils.transforms import denormalize_image
 
     town = TOWN_MAP[args.task]
@@ -113,6 +117,11 @@ def main():
         "mean_efe_score",
         "mean_epistemic_score",
         "trajectory_file",
+        # Task B obstacle avoidance metrics
+        "num_obstacles_spawned",
+        "num_obstacles_avoided",
+        "obstacle_avoidance_rate",
+        "num_lane_changes",
     ]
 
     def _save_results():
@@ -140,12 +149,17 @@ def main():
                 img, state = obs
                 agent.reset()
 
-                # Spawn obstacles for Task B
+                # Spawn obstacles for Task B (route-based for reproducibility)
+                obstacle_positions = []  # Store obstacle locations for avoidance tracking
                 if is_task_b:
-                    obstacle_actors = spawn_obstacles(
-                        env._world, env._vehicle, num_obstacles=args.num_obstacles
+                    obstacle_actors = spawn_obstacles_on_route(
+                        env._world, route_wps, num_obstacles=args.num_obstacles
                     )
-                    print(f"  Spawned {len(obstacle_actors)} obstacles for Task B")
+                    # Record obstacle positions for avoidance detection
+                    for obs_actor in obstacle_actors:
+                        obs_loc = obs_actor.get_location()
+                        obstacle_positions.append((obs_loc.x, obs_loc.y))
+                    print(f"  Spawned {len(obstacle_actors)} route-based obstacles for Task B")
 
                 onboard_frames = []
                 chase_frames = []
@@ -163,6 +177,11 @@ def main():
 
                 efe_scores = []
                 epistemic_scores = []
+                all_lane_ids = []  # For lane-change detection
+                # Track which obstacles have been passed without collision
+                obstacle_passed = [False] * len(obstacle_positions)
+                obstacle_collided = [False] * len(obstacle_positions)
+                OBSTACLE_PASS_RADIUS = 8.0  # metres to consider "at" obstacle
 
                 # Per-frame JSONL trajectory file
                 traj_file = traj_dir / f"trajectory_{args.task}_r{ri}_ep{ep}.jsonl"
@@ -195,6 +214,15 @@ def main():
                             lane_id = -1
                             road_id = -1
                         lateral_devs.append(lat_dev)
+                        all_lane_ids.append(lane_id)
+
+                        # Track obstacle avoidance for Task B
+                        if is_task_b and obstacle_positions:
+                            vx, vy = vehicle_loc.x, vehicle_loc.y
+                            for oi, (ox, oy) in enumerate(obstacle_positions):
+                                dist_to_obs = math.sqrt((vx - ox) ** 2 + (vy - oy) ** 2)
+                                if dist_to_obs < OBSTACLE_PASS_RADIUS:
+                                    obstacle_passed[oi] = True
 
                         collision_flag = info.get("collision", False)
                         lane_invasion_flag = info.get("lane_invasion", False)
@@ -202,6 +230,12 @@ def main():
                             offroad_events += 1
                         if collision_flag:
                             had_collision = True
+                            # Check if collision is near an obstacle
+                            if is_task_b and obstacle_positions:
+                                vx, vy = vehicle_loc.x, vehicle_loc.y
+                                for oi, (ox, oy) in enumerate(obstacle_positions):
+                                    if math.sqrt((vx - ox) ** 2 + (vy - oy) ** 2) < OBSTACLE_PASS_RADIUS:
+                                        obstacle_collided[oi] = True
 
                         speed = state[0]
                         if speed < STUCK_SPEED_THRESHOLD:
@@ -275,6 +309,23 @@ def main():
                 mean_efe = float(np.mean(efe_scores)) if efe_scores else 0.0
                 mean_epistemic = float(np.mean(epistemic_scores)) if epistemic_scores else 0.0
 
+                # Task B metrics: obstacle avoidance and lane changes
+                num_obstacles_spawned = len(obstacle_positions)
+                num_avoided = sum(
+                    1 for oi in range(num_obstacles_spawned)
+                    if obstacle_passed[oi] and not obstacle_collided[oi]
+                )
+                avoidance_rate = (
+                    num_avoided / num_obstacles_spawned
+                    if num_obstacles_spawned > 0 else 0.0
+                )
+                num_lane_changes = sum(
+                    1 for i in range(1, len(all_lane_ids))
+                    if all_lane_ids[i] != all_lane_ids[i - 1]
+                    and all_lane_ids[i] != -1
+                    and all_lane_ids[i - 1] != -1
+                )
+
                 row = {
                     "task": args.task,
                     "town": town,
@@ -293,14 +344,25 @@ def main():
                     "mean_efe_score": round(mean_efe, 6),
                     "mean_epistemic_score": round(mean_epistemic, 6),
                     "trajectory_file": str(traj_file.relative_to(output_dir)),
+                    "num_obstacles_spawned": num_obstacles_spawned,
+                    "num_obstacles_avoided": num_avoided,
+                    "obstacle_avoidance_rate": round(avoidance_rate, 4),
+                    "num_lane_changes": num_lane_changes,
                 }
                 results.append(row)
+                task_b_info = ""
+                if is_task_b:
+                    task_b_info = (
+                        f" obs_avoided={num_avoided}/{num_obstacles_spawned}"
+                        f" lane_changes={num_lane_changes}"
+                    )
                 print(
                     f"Route {ri} Ep {ep + 1}: {termination_reason} | "
                     f"completion={completion:.0%} (max {max_completion:.0%}) "
                     f"goal_dist={goal_dist:.1f}m (min {min_goal_dist:.1f}m) "
                     f"MLD={mld:.3f} offroad={offroad_events} frames={t + 1} "
                     f"EFE={mean_efe:.4f} epistemic={mean_epistemic:.4f}"
+                    f"{task_b_info}"
                 )
 
                 if args.save_video:
@@ -347,6 +409,20 @@ def main():
             f"\nSummary: SR={sr:.0%}, Avg Completion={avg_comp:.1f}% (max {avg_max_comp:.1f}%), "
             f"MLD={avg_mld:.3f}, EFE={avg_efe:.4f}, Epistemic={avg_epi:.4f}"
         )
+
+        # Task B aggregate metrics
+        if is_task_b:
+            total_obs = sum(r["num_obstacles_spawned"] for r in results)
+            total_avoided = sum(r["num_obstacles_avoided"] for r in results)
+            total_lc = sum(r["num_lane_changes"] for r in results)
+            avg_avoid_rate = total_avoided / max(total_obs, 1)
+            eps_with_lc = sum(1 for r in results if r["num_lane_changes"] > 0)
+            print(
+                f"Task B: Obstacles avoided={total_avoided}/{total_obs} "
+                f"({avg_avoid_rate:.0%}), "
+                f"Total lane changes={total_lc}, "
+                f"Episodes with lane change={eps_with_lc}/{len(results)}"
+            )
 
 
 if __name__ == "__main__":

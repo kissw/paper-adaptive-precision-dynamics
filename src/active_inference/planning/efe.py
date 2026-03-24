@@ -14,12 +14,14 @@ class EFEScorer:
         beta_state: float = 1.0,
         mc_samples: int = 32,
         temporal_discount: float = 0.95,
+        heading_only_state: bool = False,
     ):
         self._beta_i = beta_instrumental
         self._beta_e = beta_epistemic
         self._beta_s = beta_state
         self._mc_samples = mc_samples
         self._gamma = temporal_discount
+        self._heading_only_state = heading_only_state
 
     def instrumental_value(
         self, q_mean: Tensor, q_std: Tensor, pref_model: PreferenceModel
@@ -55,6 +57,16 @@ class EFEScorer:
         # Clamp to prevent outliers from dominating (imagination diverges)
         raw = heading_err.pow(2) + crosstrack_err.pow(2)
         return raw.clamp(max=4.0)  # [B], lower = better
+
+    def state_instrumental_value_heading_only(self, state_decoder, feat: Tensor) -> Tensor:
+        """Heading-only state penalty for Task B (lane-change avoidance).
+
+        Penalizes heading error but NOT crosstrack error, allowing the agent
+        to deviate laterally during lane changes without state-space penalty.
+        """
+        decoded = state_decoder(feat)  # [B, 4]
+        heading_err = decoded[:, 2]
+        return heading_err.pow(2).clamp(max=4.0)  # [B]
 
     def epistemic_value_ensemble(self, ensemble: EnsembleTransitionHeads, feat: Tensor) -> Tensor:
         return ensemble.epistemic_uncertainty(feat)  # [B]
@@ -104,7 +116,12 @@ class EFEScorer:
             # noisy state decoder predictions during open-loop imagination.
             # Clamped and gently weighted to act as directional nudge.
             if state_decoder is not None and self._beta_s > 0:
-                state_instr = self.state_instrumental_value(state_decoder, feat)
+                if self._heading_only_state:
+                    state_instr = self.state_instrumental_value_heading_only(
+                        state_decoder, feat
+                    )
+                else:
+                    state_instr = self.state_instrumental_value(state_decoder, feat)
                 step_score = step_score + self._beta_s * state_instr
 
             total = total + discount * step_score

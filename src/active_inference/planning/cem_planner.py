@@ -40,6 +40,7 @@ class iCEMPlanner:
         cold_start_extra_iters: int = 5,
         min_std: float = 0.1,
         keep_fraction: float = 0.1,
+        warm_start_reset_threshold: float = 1.0,
     ):
         self._action_dim = action_dim
         self._horizon = horizon
@@ -53,6 +54,7 @@ class iCEMPlanner:
         self._cold_start_extra_iters = cold_start_extra_iters
         self._min_std = min_std
         self._keep_fraction = keep_fraction
+        self._warm_start_reset_threshold = warm_start_reset_threshold
         self._prev_mean: Tensor | None = None
         self._adaptive_min_std = min_std
 
@@ -79,8 +81,8 @@ class iCEMPlanner:
         self._crosstrack_error = crosstrack_error
         self._state_error = state_error
 
-        # Exploration widening
-        if state_error > 1.0:
+        # Exploration widening (threshold configurable for Task B)
+        if state_error > self._warm_start_reset_threshold:
             self._adaptive_min_std = self._min_std * 3.0
             self._prev_mean = None
         elif state_error > 0.3:

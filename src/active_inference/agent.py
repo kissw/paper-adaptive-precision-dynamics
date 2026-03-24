@@ -70,6 +70,7 @@ class DeepAIFAgent:
             cold_start_extra_iters=cfg.cem.cold_start_extra_iters,
             min_std=cfg.cem.min_std,
             keep_fraction=cfg.cem.keep_fraction,
+            warm_start_reset_threshold=getattr(cfg.cem, "warm_start_reset_threshold", 1.0),
         )
         self.efe_scorer = EFEScorer(
             beta_instrumental=cfg.efe.beta_instrumental,
@@ -77,6 +78,7 @@ class DeepAIFAgent:
             beta_state=cfg.efe.beta_state,
             mc_samples=cfg.efe.mc_samples,
             temporal_discount=cfg.efe.temporal_discount,
+            heading_only_state=getattr(cfg.efe, "heading_only_state", False),
         )
 
         self._optimizer = torch.optim.Adam(self.world_model.parameters(), lr=cfg.training.lr)

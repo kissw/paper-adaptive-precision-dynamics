@@ -5,12 +5,24 @@ prefer braking. This script encodes preference data through the world
 model, filters to only moving frames (speed > threshold), and re-fits
 the GMM. The world model weights are NOT changed.
 
+Supports task-specific filtering via --task_filter:
+  A = lane-keeping only (task_label==0)
+  B = lane-change only (task_label==1)
+  (omit for all data)
+
 Usage:
     uv run python scripts/refit_preference.py \
         --checkpoint outputs/train_v1/checkpoints/final.pt \
         --data data/expert_data.h5 \
         --output outputs/train_v1/checkpoints/final_refit.pt \
         --min_speed 1.0
+
+    # Task B preference (lane-change episodes only):
+    uv run python scripts/refit_preference.py \
+        --checkpoint outputs/train_v6_combined/checkpoints/best.pt \
+        --data data/expert_data_v6_combined.h5 \
+        --output outputs/train_v6_combined/checkpoints/best_taskb_pref.pt \
+        --task_filter B --K 7
 """
 
 import argparse
@@ -36,11 +48,30 @@ def main():
     parser.add_argument("--max_samples", type=int, default=5000)
     parser.add_argument("--fit_iters", type=int, default=300)
     parser.add_argument("--fit_lr", type=float, default=0.01)
+    parser.add_argument("--task_filter", choices=["A", "B"], default=None,
+                        help="Filter by task: A=lane-keep, B=lane-change")
+    parser.add_argument("--K", type=int, default=None,
+                        help="Override GMM component count (default: use config)")
     args = parser.parse_args()
 
     cfg = Config.from_yaml(args.config)
+
+    # Override GMM K if specified
+    if args.K is not None:
+        cfg.preference.K = args.K
+        print(f"Overriding GMM K={args.K}")
+
     agent = DeepAIFAgent(cfg)
     agent.load_checkpoint(args.checkpoint)
+
+    # If K was overridden, reinitialize preference with new K
+    if args.K is not None:
+        from active_inference.training.preference import PreferenceModel
+        agent.preference = PreferenceModel(
+            K=args.K,
+            latent_dim=cfg.rssm.stoch_dim,
+            min_std=cfg.preference.min_std,
+        ).to(agent._device)
 
     device = agent._device
     wm = agent.world_model
@@ -57,6 +88,11 @@ def main():
             success_flags = f["success_flags"][:]
         else:
             success_flags = np.ones(len(images), dtype=bool)
+        # Load task_labels for task filtering
+        if "task_labels" in f:
+            task_labels = f["task_labels"][:]
+        else:
+            task_labels = None
 
     print(f"Loaded {len(images)} frames")
     print(f"States shape: {states.shape}")
@@ -68,8 +104,23 @@ def main():
     # Filter: only successful frames with speed > min_speed
     speeds = states[:, 0]  # speed is first state dimension
     mask = success_flags & (speeds > args.min_speed)
+
+    # Apply task filter
+    if args.task_filter is not None:
+        if task_labels is None:
+            print("WARNING: --task_filter specified but dataset has no task_labels. "
+                  "Ignoring filter.")
+        else:
+            target_label = 0 if args.task_filter == "A" else 1
+            task_mask = task_labels == target_label
+            mask = mask & task_mask
+            label_name = "lane-keep" if args.task_filter == "A" else "lane-change"
+            n_task = int(task_mask.sum())
+            print(f"Task filter: {args.task_filter} ({label_name}) -> "
+                  f"{n_task}/{len(images)} frames match")
+
     valid_indices = np.where(mask)[0]
-    print(f"Frames with speed > {args.min_speed} m/s and success: {len(valid_indices)}/{len(images)}")
+    print(f"Frames after all filters: {len(valid_indices)}/{len(images)}")
 
     if len(valid_indices) < 100:
         print("ERROR: Too few valid frames for GMM fitting")

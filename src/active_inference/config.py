@@ -58,6 +58,7 @@ class CEMConfig:
     cold_start_extra_iters: int = 5
     min_std: float = 0.1
     keep_fraction: float = 0.1
+    warm_start_reset_threshold: float = 1.0
 
 
 @dataclass
@@ -81,6 +82,7 @@ class EFEConfig:
     beta_state: float = 1.0
     mc_samples: int = 32
     temporal_discount: float = 0.95
+    heading_only_state: bool = False
 
 
 @dataclass

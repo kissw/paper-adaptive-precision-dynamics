@@ -1,0 +1,49 @@
+# Task B: Obstacle Avoidance via Lane Change
+#
+# Key differences from default.yaml:
+# - beta_state: 0.2 (reduced from 0.5 to allow crosstrack deviation during lane change)
+# - heading_only_state: false (set to true if beta_state=0.2 still prevents lane changes)
+# - horizon: 15 (longer planning horizon for lane-change commitment)
+# - noise_scale: [1.0, 0.6] (wider steer exploration for lane-change discovery)
+# - K: 7 (more GMM components for richer lane-change distribution)
+# - accel_prior: 0.2 (slower approach to obstacles)
+# - warm_start_reset_threshold: 4.0 (prevent mid-lane-change crosstrack from resetting warm-start)
+
+seed: 42
+device: cuda
+
+cem:
+  horizon: 15
+  n_samples: 500
+  n_elites: 50
+  n_iters: 5
+  colored_noise_beta: 1.0
+  warm_start: true
+  action_dim: 2
+  noise_scale: [1.0, 0.6]
+  accel_prior: 0.2
+  cold_start_extra_iters: 5
+  min_std: 0.1
+  keep_fraction: 0.2
+  warm_start_reset_threshold: 4.0
+
+preference:
+  K: 7
+  min_std: 0.01
+  update_interval: 1
+  warmup_epoch: 10
+  fit_iters: 300
+  fit_lr: 0.005
+  max_samples: 5000
+
+efe:
+  beta_instrumental: 1.0
+  beta_epistemic: 0.1
+  beta_state: 0.2
+  mc_samples: 32
+  temporal_discount: 0.95
+  heading_only_state: false
+
+evaluation:
+  towns:
+    task_b: Town06_Opt
