@@ -6,6 +6,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Deep Active Inference agent for autonomous driving in CARLA 0.9.16. Uses Expected Free Energy (EFE) minimization with iCEM planning — **not** reinforcement learning. ALL control must come from the Active Inference framework. No classical controllers (Stanley, PID).
 
+## Locations of Data and Outputs
+
+### Data
+- `data/` — HDF5 datasets (expert_data_mixed.h5, task_b_lanechange.h5, etc.)
+
+### Outputs
+
+Naming convention:
+- `train_v{#}_{desc}/` — trained model (checkpoints, logs). Add `task_{a/b}` prefix only when task-specific.
+- `eval_task_{a/b}_v{#}_{desc}/` — evaluations, trajectories, and videos (chase, onboard).
+
+Active directories in `outputs/`:
+
+| Directory | Contents |
+|-----------|----------|
+| `train_v5_finetune/` | Shared world model (4D state, mixed Town04+Town06 data). Best checkpoint for both tasks. |
+| `train_task_b_v6_combined/` | Task B world model (5D experiment, abandoned). Task B preference checkpoint (K=7). |
+| `eval_task_a_v10_baseline/` | Task A baseline eval — Town06 straight highway (41.6% avg completion). |
+| `eval_task_a_v10_moderate/` | Task A moderate curves — Town04 0°→85° (81.2% avg completion). |
+| `eval_task_b_v5_r0/` | Task B Route 0 — 373m, 2 obstacles, 5 episodes (100% SR, 10/10 avoided). |
+| `eval_task_b_v5_r0_video/` | Task B Route 0 re-run with chase+onboard video. |
+| `eval_task_b_v5_r1_video/` | Task B Route 1 — 518m, 3 obstacles, 3 episodes with video (100% SR, 9/9 avoided). |
+| `archive/` | One-off diagnostics (verify_steering, earlier iterations). |
+
+
 ## Commands
 
 ```bash
@@ -78,9 +103,10 @@ DeepAIFAgent (agent.py)
 
 Dataclass-based (`src/active_inference/config.py`) with YAML overlay via OmegaConf. `Config.from_yaml()` merges schema defaults with YAML overrides.
 
-- `configs/default.yaml` — production config
+- `configs/default.yaml` — production config (Task A defaults)
 - `configs/experiment/debug.yaml` — tiny model for fast tests
 - `configs/experiment/task_b.yaml` — Task B overrides (lower beta_state, longer horizon, more GMM components)
+- `configs/experiment/task_b_v5.yaml` — Task B v5 obstacle avoidance config (beta_obstacle=40.0, horizon=15, 4D state)
 
 ## Data Format
 
