@@ -186,24 +186,31 @@ def spawn_obstacles_on_route(
                 )
                 continue
 
-        # Apply lane offset: shift obstacle to adjacent lane if requested
+        # Apply lane offset: shift obstacle to adjacent lane if requested.
+        # Supports multi-lane offsets (e.g., offset=2 chains get_left_lane twice).
         spawn_wp = wp
         if lane_offsets is not None and oi < len(lane_offsets) and lane_offsets[oi] != 0:
             offset_val = lane_offsets[oi]
-            get_lane_fn = wp.get_left_lane if offset_val > 0 else wp.get_right_lane
-            adj_wp = get_lane_fn()
-            if adj_wp is not None and str(adj_wp.lane_type) == "Driving":
-                spawn_wp = adj_wp
+            direction = "left" if offset_val > 0 else "right"
+            steps = abs(offset_val)
+            cur_wp = wp
+            for step in range(steps):
+                get_lane_fn = cur_wp.get_left_lane if offset_val > 0 else cur_wp.get_right_lane
+                adj_wp = get_lane_fn()
+                if adj_wp is not None and str(adj_wp.lane_type) == "Driving":
+                    cur_wp = adj_wp
+                else:
+                    logger.warning(
+                        "Obstacle %d: %s lane step %d/%d not available (lane %d), "
+                        "stopping at current offset",
+                        oi, direction, step + 1, steps, cur_wp.lane_id,
+                    )
+                    break
+            if cur_wp != wp:
+                spawn_wp = cur_wp
                 logger.info(
-                    "Obstacle %d shifted to %s lane (offset=%d, lane %d→%d)",
-                    oi, "left" if offset_val > 0 else "right",
-                    offset_val, wp.lane_id, adj_wp.lane_id,
-                )
-            else:
-                logger.warning(
-                    "Obstacle %d: cannot shift to %s lane (not available), "
-                    "spawning in route lane",
-                    oi, "left" if offset_val > 0 else "right",
+                    "Obstacle %d shifted %d %s lane(s) (offset=%d, lane %d→%d)",
+                    oi, steps, direction, offset_val, wp.lane_id, spawn_wp.lane_id,
                 )
 
         import carla as _carla

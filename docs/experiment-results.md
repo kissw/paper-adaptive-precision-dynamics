@@ -160,6 +160,8 @@ Obstacles placed in alternating lanes (`lane_offsets=[0, 1, 0]`): obstacles 0 an
 
 **Behavior pattern:** The ego actively evades obstacle 0 (lane change left), then passively clears obstacle 1 via residual lateral offset (~4m clearance from the first maneuver), then actively evades obstacle 2 (lane change left again after CEM-driven drift back toward center). Two active avoidance maneuvers per episode.
 
+**Note on evasion overshoot:** The ego consistently overshoots by ~2 lanes during evasion (landing at Y≈45, lane -5) due to vehicle dynamics momentum, regardless of evasion steer magnitude (0.5 or 0.7). With `beta_state=0.0` there is no crosstrack centering force, so the ego remains offset. This means obstacle 1 in the adjacent lane (Y≈49) is passively cleared with ~4m lateral margin. See `docs/plans/multi-active-lane-change.md` for analysis and potential solutions within the AIF framework.
+
 #### Combined Summary
 
 | Metric | Route 0 (5 ep) | Route 1 (3 ep) | Route 2 (3 ep) | Combined |
