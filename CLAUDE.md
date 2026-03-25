@@ -28,6 +28,7 @@ Active directories in `outputs/`:
 | `eval_task_b_v5_r0/` | Task B Route 0 — 373m, 2 obstacles, 5 episodes (100% SR, 10/10 avoided). |
 | `eval_task_b_v5_r0_video/` | Task B Route 0 re-run with chase+onboard video. |
 | `eval_task_b_v5_r1_video/` | Task B Route 1 — 518m, 3 obstacles, 3 episodes with video (100% SR, 9/9 avoided). |
+| `eval_task_b_v5_r2_alternating/` | Task B Route 2 — 518m, 3 alternating-lane obstacles, 3 episodes with video (100% SR, 9/9 avoided). |
 | `archive/` | One-off diagnostics (verify_steering, earlier iterations). |
 
 

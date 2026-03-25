@@ -129,6 +129,7 @@ def spawn_obstacles_on_route(
     route_waypoints: list,
     num_obstacles: int = 3,
     fractions: list[float] | None = None,
+    lane_offsets: list[int] | None = None,
 ) -> list:
     """Spawn obstacles at fixed fractions along a route for reproducibility.
 
@@ -141,6 +142,10 @@ def spawn_obstacles_on_route(
         num_obstacles: Number of obstacles to spawn.
         fractions: Route fractions (0.0-1.0) for obstacle placement.
             Defaults to [0.15, 0.45, 0.75].
+        lane_offsets: Per-obstacle lane offset. 0 = route lane (default),
+            1 = left adjacent lane, -1 = right adjacent lane. When set,
+            obstacles alternate between lanes to force multiple lane changes.
+            Defaults to None (all obstacles in route lane).
 
     Returns:
         List of spawned CARLA actors.
@@ -148,13 +153,15 @@ def spawn_obstacles_on_route(
     if fractions is None:
         fractions = [0.15, 0.45, 0.75]
     fractions = fractions[:num_obstacles]
+    if lane_offsets is not None:
+        lane_offsets = lane_offsets[:num_obstacles]
 
     bp_lib = world.get_blueprint_library()
     vehicle_bp = bp_lib.filter("vehicle.tesla.model3")[0]
     n_wps = len(route_waypoints)
 
     actors = []
-    for frac in fractions:
+    for oi, frac in enumerate(fractions):
         idx = min(int(frac * n_wps), n_wps - 1)
         wp, _ = route_waypoints[idx]
 
@@ -179,23 +186,47 @@ def spawn_obstacles_on_route(
                 )
                 continue
 
+        # Apply lane offset: shift obstacle to adjacent lane if requested
+        spawn_wp = wp
+        if lane_offsets is not None and oi < len(lane_offsets) and lane_offsets[oi] != 0:
+            offset_val = lane_offsets[oi]
+            get_lane_fn = wp.get_left_lane if offset_val > 0 else wp.get_right_lane
+            adj_wp = get_lane_fn()
+            if adj_wp is not None and str(adj_wp.lane_type) == "Driving":
+                spawn_wp = adj_wp
+                logger.info(
+                    "Obstacle %d shifted to %s lane (offset=%d, lane %d→%d)",
+                    oi, "left" if offset_val > 0 else "right",
+                    offset_val, wp.lane_id, adj_wp.lane_id,
+                )
+            else:
+                logger.warning(
+                    "Obstacle %d: cannot shift to %s lane (not available), "
+                    "spawning in route lane",
+                    oi, "left" if offset_val > 0 else "right",
+                )
+
         import carla as _carla
-        intended_x = wp.transform.location.x
-        intended_y = wp.transform.location.y
+        intended_x = spawn_wp.transform.location.x
+        intended_y = spawn_wp.transform.location.y
         spawn_loc = _carla.Location(
             x=intended_x,
             y=intended_y,
-            z=wp.transform.location.z + 0.5,
+            z=spawn_wp.transform.location.z + 0.5,
         )
-        spawn_tf = _carla.Transform(spawn_loc, wp.transform.rotation)
+        spawn_tf = _carla.Transform(spawn_loc, spawn_wp.transform.rotation)
         try:
             obstacle = world.try_spawn_actor(vehicle_bp, spawn_tf)
             if obstacle:
                 actors.append((obstacle, intended_x, intended_y))
+                lane_info = ""
+                if lane_offsets is not None and oi < len(lane_offsets):
+                    lane_info = f" lane_offset={lane_offsets[oi]}"
                 logger.info(
                     "Spawned obstacle at route fraction %.2f (idx %d/%d, lane %d) "
-                    "pos=(%.1f, %.1f)",
-                    frac, idx, n_wps, wp.lane_id, intended_x, intended_y,
+                    "pos=(%.1f, %.1f)%s",
+                    frac, idx, n_wps, spawn_wp.lane_id, intended_x, intended_y,
+                    lane_info,
                 )
         except Exception:
             pass

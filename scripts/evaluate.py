@@ -153,9 +153,10 @@ def main():
                 obstacle_positions = []  # Store obstacle locations for avoidance tracking
                 if is_task_b:
                     obs_fractions = route.get("obstacle_fractions", None)
+                    obs_lane_offsets = route.get("lane_offsets", None)
                     obstacle_actors = spawn_obstacles_on_route(
                         env._world, route_wps, num_obstacles=args.num_obstacles,
-                        fractions=obs_fractions,
+                        fractions=obs_fractions, lane_offsets=obs_lane_offsets,
                     )
                     # Use intended positions from spawn function (CARLA may
                     # report (0,0) before physics settles)

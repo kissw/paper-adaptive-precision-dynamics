@@ -145,15 +145,30 @@ The obstacle avoidance operates as a **high-precision action prior** within the 
 | 2 | goal_reached | 98.9% | 3/3 | 7 | 0.62 |
 | **Avg** | **100% SR** | **99.1%** | **9/9 (100%)** | **6.3** | **0.65** |
 
+#### Route 2: 518m, 3 alternating-lane obstacles per episode, 3 episodes
+
+Obstacles placed in alternating lanes (`lane_offsets=[0, 1, 0]`): obstacles 0 and 2 in the route lane, obstacle 1 in the left adjacent lane. This forces the ego to navigate obstacles in different lanes.
+
+**Obstacle positions:** (106.3, 52.3) route lane → (258.8, 48.9) left lane → (416.4, 52.3) route lane
+
+| Episode | Success | Completion | Obstacles Avoided | Lane Changes | MLD |
+|---------|---------|------------|-------------------|-------------|------|
+| 0 | goal_reached | 98.9% | 3/3 | 7 | 0.68 |
+| 1 | goal_reached | 99.0% | 3/3 | 6 | 0.65 |
+| 2 | goal_reached | 99.0% | 3/3 | 6 | 0.67 |
+| **Avg** | **100% SR** | **99.1%** | **9/9 (100%)** | **6.3** | **0.67** |
+
+**Behavior pattern:** The ego actively evades obstacle 0 (lane change left), then passively clears obstacle 1 via residual lateral offset (~4m clearance from the first maneuver), then actively evades obstacle 2 (lane change left again after CEM-driven drift back toward center). Two active avoidance maneuvers per episode.
+
 #### Combined Summary
 
-| Metric | Route 0 (5 ep) | Route 1 (3 ep) | Combined |
-|--------|---------------|---------------|----------|
-| Success Rate | 100% | 100% | **100%** |
-| Obstacle Avoidance | 10/10 (100%) | 9/9 (100%) | **19/19 (100%)** |
-| Avg Completion | 98.6% | 99.1% | **98.8%** |
-| Avg MLD | 0.67m | 0.65m | **0.66m** |
-| Avg Lane Changes | 6.0 | 6.3 | **6.1** |
+| Metric | Route 0 (5 ep) | Route 1 (3 ep) | Route 2 (3 ep) | Combined |
+|--------|---------------|---------------|---------------|----------|
+| Success Rate | 100% | 100% | 100% | **100%** |
+| Obstacle Avoidance | 10/10 (100%) | 9/9 (100%) | 9/9 (100%) | **28/28 (100%)** |
+| Avg Completion | 98.6% | 99.1% | 99.1% | **98.9%** |
+| Avg MLD | 0.67m | 0.65m | 0.67m | **0.66m** |
+| Avg Lane Changes | 6.0 | 6.3 | 6.3 | **6.2** |
 
 Task A regression check: no degradation (81.2% completion unchanged on moderate curves).
 
@@ -199,6 +214,7 @@ Just as a novice driver struggles with sharp turns they haven't practiced, the A
 | Baseline R1 | Town06 | 0→2 | 1329m | 0 | Straight highway |
 | Task B Route 0 | Town06_Opt | 0→152 | 373m | 2 | Primary obstacle avoidance route |
 | Task B Route 1 | Town06_Opt | 22→152 | 518m | 3 | Longer variant, obstacle fractions [0.15, 0.45, 0.75] |
+| Task B Route 2 | Town06_Opt | 22→152 | 518m | 3 | Alternating-lane obstacles, lane_offsets [0, 1, 0] |
 
 ---
 
