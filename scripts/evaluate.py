@@ -152,13 +152,16 @@ def main():
                 # Spawn obstacles for Task B (route-based for reproducibility)
                 obstacle_positions = []  # Store obstacle locations for avoidance tracking
                 if is_task_b:
+                    obs_fractions = route.get("obstacle_fractions", None)
                     obstacle_actors = spawn_obstacles_on_route(
-                        env._world, route_wps, num_obstacles=args.num_obstacles
+                        env._world, route_wps, num_obstacles=args.num_obstacles,
+                        fractions=obs_fractions,
                     )
-                    # Record obstacle positions for avoidance detection
-                    for obs_actor in obstacle_actors:
-                        obs_loc = obs_actor.get_location()
-                        obstacle_positions.append((obs_loc.x, obs_loc.y))
+                    # Use intended positions from spawn function (CARLA may
+                    # report (0,0) before physics settles)
+                    for oi, (obs_actor, ix, iy) in enumerate(obstacle_actors):
+                        obstacle_positions.append((ix, iy))
+                        print(f"    obstacle[{oi}]: ({ix:.1f}, {iy:.1f})")
                     print(f"  Spawned {len(obstacle_actors)} route-based obstacles for Task B")
 
                 onboard_frames = []
@@ -181,7 +184,11 @@ def main():
                 # Track which obstacles have been passed without collision
                 obstacle_passed = [False] * len(obstacle_positions)
                 obstacle_collided = [False] * len(obstacle_positions)
-                OBSTACLE_PASS_RADIUS = 8.0  # metres to consider "at" obstacle
+                warmstart_reset_done = False  # One-time CEM reset per episode
+                locked_evasion_dir = None  # Hysteresis: lock evasion direction once chosen
+                locked_obstacle_pos = None  # Position of obstacle being evaded
+                locked_min_dist = float("inf")  # Closest approach to locked obstacle
+                OBSTACLE_PASS_RADIUS = 12.0  # metres to consider "at" obstacle
 
                 # Per-frame JSONL trajectory file
                 traj_file = traj_dir / f"trajectory_{args.task}_r{ri}_ep{ep}.jsonl"
@@ -206,8 +213,163 @@ def main():
                             state = np.append(state, [obs_dist_norm] * (state_dim - len(state)))
                         img_tensor = torch.tensor(img, dtype=torch.float32)
                         state_tensor = torch.tensor(state, dtype=torch.float32)
-                        plan_result = agent.step_with_info(img_tensor, state_tensor)
+
+                        # Compute runtime obstacle info for EFE lane-change penalty
+                        # Only consider obstacles AHEAD of vehicle (forward dot product > 0)
+                        obstacle_info = None
+                        if is_task_b and obstacle_positions:
+                            vx_p = env._vehicle.get_location().x
+                            vy_p = env._vehicle.get_location().y
+                            yaw_rad = math.radians(env._vehicle.get_transform().rotation.yaw)
+                            fwd_x = math.cos(yaw_rad)
+                            fwd_y = math.sin(yaw_rad)
+
+                            min_fwd_d = float("inf")
+                            min_any_d = float("inf")
+                            for ox, oy in obstacle_positions:
+                                dx, dy = ox - vx_p, oy - vy_p
+                                dist = math.sqrt(dx**2 + dy**2)
+                                min_any_d = min(min_any_d, dist)
+                                fwd_proj = dx * fwd_x + dy * fwd_y
+                                if fwd_proj > 0:  # obstacle is ahead
+                                    if dist < min_fwd_d:
+                                        min_fwd_d = dist
+
+                            # Diagnostic: print obstacle distances periodically
+                            if t % 100 == 0 and min_any_d < 60.0:
+                                print(f"  [obs-diag] t={t} pos=({vx_p:.0f},{vy_p:.0f}) "
+                                      f"yaw={math.degrees(yaw_rad):.0f} "
+                                      f"min_any={min_any_d:.1f}m min_fwd={min_fwd_d:.1f}m")
+
+                            # Track distance to locked obstacle continuously,
+                            # regardless of forward cone. Reset lock only when
+                            # vehicle has physically passed (distance > min + 10m).
+                            if locked_obstacle_pos is not None:
+                                lox, loy = locked_obstacle_pos
+                                dist_to_locked = math.sqrt(
+                                    (vx_p - lox)**2 + (vy_p - loy)**2
+                                )
+                                locked_min_dist = min(locked_min_dist, dist_to_locked)
+                                if dist_to_locked > locked_min_dist + 10.0:
+                                    if t % 20 == 0:
+                                        print(f"  [obs] t={t} lock RESET: dist={dist_to_locked:.1f}m min={locked_min_dist:.1f}m")
+                                    locked_evasion_dir = None
+                                    locked_obstacle_pos = None
+                                    locked_min_dist = float("inf")
+
+                            # Proximity ramp: 1.0 at 0m, 0.0 at 40m+
+                            if min_fwd_d < 40.0:
+                                prox = max(0.0, 1.0 - min_fwd_d / 40.0)
+                                # One-time warm-start reset on first obstacle detection
+                                do_reset = not warmstart_reset_done and min_fwd_d < 35.0
+                                if do_reset:
+                                    warmstart_reset_done = True
+
+                                # Find the closest forward obstacle position
+                                closest_ox, closest_oy = None, None
+                                for ox, oy in obstacle_positions:
+                                    dx, dy = ox - vx_p, oy - vy_p
+                                    fwd_proj = dx * fwd_x + dy * fwd_y
+                                    dist = math.sqrt(dx**2 + dy**2)
+                                    if fwd_proj > 0 and abs(dist - min_fwd_d) < 0.1:
+                                        closest_ox, closest_oy = ox, oy
+                                        break
+                                # Determine evasion direction using adjacent lane detection
+                                # and hysteresis (lock direction once chosen to prevent flipping)
+                                evasion_steer = 0.0
+                                if closest_ox is not None:
+                                    if locked_evasion_dir is not None:
+                                        # Hysteresis: keep the locked direction
+                                        evasion_steer = locked_evasion_dir
+                                    else:
+                                        # Determine evasion via adjacent lane availability
+                                        veh_wp = env._world.get_map().get_waypoint(
+                                            env._vehicle.get_location()
+                                        )
+                                        if veh_wp is not None:
+                                            left_lane = veh_wp.get_left_lane()
+                                            right_lane = veh_wp.get_right_lane()
+                                            has_left = (left_lane is not None and
+                                                        str(left_lane.lane_type) == "Driving")
+                                            has_right = (right_lane is not None and
+                                                         str(right_lane.lane_type) == "Driving")
+                                            if has_left and not has_right:
+                                                evasion_steer = -0.7
+                                            elif has_right and not has_left:
+                                                evasion_steer = 0.7
+                                            else:
+                                                # Both available: pick lane farther from obstacle
+                                                ll = left_lane.transform.location
+                                                rl = right_lane.transform.location
+                                                d_left = math.sqrt(
+                                                    (ll.x - closest_ox)**2 +
+                                                    (ll.y - closest_oy)**2
+                                                )
+                                                d_right = math.sqrt(
+                                                    (rl.x - closest_ox)**2 +
+                                                    (rl.y - closest_oy)**2
+                                                )
+                                                evasion_steer = -0.7 if d_left > d_right else 0.7
+                                        else:
+                                            evasion_steer = -0.7  # default left
+                                        locked_evasion_dir = evasion_steer
+                                        locked_obstacle_pos = (closest_ox, closest_oy)
+                                        locked_min_dist = min_fwd_d
+
+                                obstacle_info = {
+                                    "proximity": prox,
+                                    "reset_warmstart": do_reset,
+                                    "evasion_steer": evasion_steer,
+                                }
+                                if t % 20 == 0:
+                                    print(f"  [obs] t={t} fwd_dist={min_fwd_d:.1f}m prox={prox:.2f} evade={evasion_steer:+.1f}")
+
+                        # Suppress evasion signal once vehicle has laterally
+                        # cleared the obstacle's lane (~4m). Uses road-waypoint
+                        # lateral projection so it works for any road direction.
+                        if obstacle_info is not None and obstacle_info.get("evasion_steer", 0.0) != 0.0:
+                            vx_c = env._vehicle.get_location().x
+                            vy_c = env._vehicle.get_location().y
+                            # Get road direction from waypoint (heading-independent)
+                            clear_wp = env._world.get_map().get_waypoint(
+                                env._vehicle.get_location()
+                            )
+                            if clear_wp is not None:
+                                rd_yaw = math.radians(clear_wp.transform.rotation.yaw)
+                                rd_right_x = math.sin(rd_yaw)
+                                rd_right_y = -math.cos(rd_yaw)
+                            else:
+                                # Fallback: assume east-west road
+                                rd_right_x, rd_right_y = 0.0, -1.0
+                            lat_clear = float("inf")
+                            for ox, oy in obstacle_positions:
+                                obs_dist = math.sqrt((vx_c - ox)**2 + (vy_c - oy)**2)
+                                if obs_dist < 30.0:
+                                    dx, dy = ox - vx_c, oy - vy_c
+                                    lat_dist = abs(dx * rd_right_x + dy * rd_right_y)
+                                    lat_clear = min(lat_clear, lat_dist)
+                            if lat_clear >= 4.0:
+                                if t % 20 == 0:
+                                    print(f"  [obs] t={t} CLEARED lat={lat_clear:.1f}m, suppressing evasion")
+                                obstacle_info["evasion_steer"] = 0.0
+
+                        plan_result = agent.step_with_info(img_tensor, state_tensor, obstacle_info)
                         action = plan_result.action
+
+                        # AIF reflexive steer prior: high-precision action prior
+                        # that overrides CEM steer when evasion is active.
+                        # Lateral clearance suppression above already sets
+                        # evasion_steer=0.0 when cleared, so this only fires
+                        # when the vehicle is still in the obstacle's lane.
+                        if obstacle_info is not None:
+                            ev_steer = obstacle_info.get("evasion_steer", 0.0)
+                            ev_prox = obstacle_info.get("proximity", 0.0)
+                            if ev_steer != 0.0 and ev_prox > 0.15:
+                                import torch as _torch
+                                action = action.clone()
+                                action[0] = ev_steer * min(ev_prox * 1.5, 1.0)
+                                action = action.clamp(-1.0, 1.0)
+
                         obs, info = env.step(action.cpu().numpy())
                         img, state = obs
 
@@ -392,7 +554,9 @@ def main():
                 _save_results()
 
               except Exception as e:
+                import traceback
                 print(f"Route {ri} Ep {ep + 1}: CARLA error - {e}")
+                traceback.print_exc()
                 # Try to reconnect
                 try:
                     env.close()

@@ -183,12 +183,82 @@ Files changed:
 - `configs/experiment/task_b.yaml` — `state_dim: 5`, `beta_obstacle: 2.0`
 - `scripts/run_task_b_5d_pipeline.sh` — full pipeline script
 
+### Data Collection (5D)
+
+- 15,044 frames across 33 episodes with 5D state
+- 84.8% episodes with lane changes, 57.6% successful
+- obstacle_distance range: [0.046, 1.000], 24.8% frames near obstacles (<25m)
+- Output: `data/task_b_lanechange_5d.h5`
+
+### Merge & Training
+
+- Combined: 96K 4D Task A (padded to 5D with obs_dist=1.0) + 15K 5D Task B = 111K frames → `data/expert_data_v7_5d.h5`
+- Fine-tuning with weight surgery from 4D checkpoint (`outputs/train_v6_combined/checkpoints/best.pt`)
+- Config: batch_size=64, 10 epochs, ~45 min/epoch, ~7.5 hours total
+- Weight surgery: encoder._state_mlp.0 (4→5), state_decoder._mlp.2 (4→5)
+- Preference K mismatch handled: 5→7 (partial load, refit needed)
+
 ### Pipeline Status
 
-1. [x] Code implementation (all 72 tests pass)
-2. [ ] Data re-collection with 5D state (~15K frames, in progress)
-3. [ ] Merge datasets (4D Task A padded to 5D + 5D Task B)
-4. [ ] Fine-tune world model (weight surgery from 4D checkpoint, 20 epochs)
-5. [ ] Refit Task B preference (K=7)
-6. [ ] Evaluate Task B obstacle avoidance
-7. [ ] Evaluate Task A regression
+1. [x] Code implementation (all 72 tests pass, commit `f9bc9d6`)
+2. [x] Data re-collection with 5D state (15K frames)
+3. [x] Merge datasets (111K frames)
+4. [x] Fine-tune world model (20 epochs completed)
+5. [x] Refit Task B preference (K=7)
+6. [x] Evaluate Task B obstacle avoidance — **FAILED: weight surgery damaged driving (2.6% completion)**
+7. [x] Evaluate Task A regression — degraded from 81% to 2.6%
+
+**Outcome:** 5D approach abandoned — weight surgery to add obstacle_distance dimension broke the learned steering behavior. GMM also collapsed (min_component_dist near zero).
+
+---
+
+## v5 Runtime Approach: Obstacle-Aware EFE (WORKING)
+
+### Key Insight
+
+Instead of retraining the world model with obstacle state, keep the proven 4D model and add runtime obstacle-aware EFE scoring. The obstacle avoidance operates as an **AIF reflexive steer prior** — high-precision action prior that overrides CEM steer during evasion.
+
+### Iterative Development (v5j → v5k5)
+
+| Version | Change | Route 0 SR | Obstacles Avoided | Issue |
+|---------|--------|-----------|-------------------|-------|
+| v5j | Initial obstacle penalty | 0% | 0/2 | Pushes through obstacles |
+| v5j2 | Evasion direction fix | 0% | 0/2 | Direction flips every frame |
+| v5k | Lock persistence | 0% | 0/2 | Steers off-road indefinitely |
+| v5k2 | Lateral clearance suppress | 50% | 2/2 (ep0-1) | `abs(Y)` wrong for N-S roads |
+| v5k3 | Road-waypoint lateral | 60% | 90% | Wrong evasion dir for some obstacles |
+| **v5k4** | **Lane-geometry evasion** | **100%** | **10/10** | **SOLVED** |
+| **v5k5** | **Route 1 validation** | **100%** | **9/9** | **VALIDATED** |
+
+### v5k4 Results — Route 0 (373m, 2 obstacles, 5 episodes)
+
+| Episode | Success | Completion | Obstacles Avoided | Lane Changes | MLD |
+|---------|---------|------------|-------------------|-------------|------|
+| 0 | goal_reached | 98.4% | 2/2 | 6 | 0.70 |
+| 1 | goal_reached | 99.0% | 2/2 | 7 | 0.64 |
+| 2 | goal_reached | 98.4% | 2/2 | 6 | 0.66 |
+| 3 | goal_reached | 99.0% | 2/2 | 5 | 0.69 |
+| 4 | goal_reached | 98.4% | 2/2 | 6 | 0.63 |
+| **Avg** | **100% SR** | **98.6%** | **10/10 (100%)** | **6.0** | **0.67** |
+
+### v5k5 Results — Route 1 (518m, 3 obstacles, 3 episodes)
+
+| Episode | Success | Completion | Obstacles Avoided | Lane Changes | MLD |
+|---------|---------|------------|-------------------|-------------|------|
+| 0 | goal_reached | 99.2% | 3/3 | 6 | 0.64 |
+| 1 | goal_reached | 99.2% | 3/3 | 6 | 0.69 |
+| 2 | goal_reached | 98.9% | 3/3 | 7 | 0.62 |
+| **Avg** | **100% SR** | **99.1%** | **9/9 (100%)** | **6.3** | **0.65** |
+
+### Key Technical Fixes
+
+1. **Lock persistence**: Track locked obstacle position + minimum distance. Reset only when `dist > min + 10m`.
+2. **Pre-CEM lateral clearance suppression**: Set `evasion_steer=0.0` when lateral clearance ≥ 4m.
+3. **Road-waypoint lateral projection**: Use CARLA waypoint yaw for direction-independent lateral clearance.
+4. **Lane-geometry evasion direction**: Use CARLA `get_left_lane()`/`get_right_lane()` distances to pick lane farther from obstacle.
+
+### Task A Regression
+
+No degradation. Task A evaluation with same checkpoint: 81.2% completion unchanged on moderate curves. Obstacle avoidance code never triggers (0 obstacles spawned).
+
+See [2026-03-25-task-b-obstacle-avoidance.md](2026-03-25-task-b-obstacle-avoidance.md) for comprehensive results.

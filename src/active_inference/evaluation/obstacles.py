@@ -179,15 +179,23 @@ def spawn_obstacles_on_route(
                 )
                 continue
 
-        obstacle_transform = wp.transform
-        obstacle_transform.location.z += 0.5
+        import carla as _carla
+        intended_x = wp.transform.location.x
+        intended_y = wp.transform.location.y
+        spawn_loc = _carla.Location(
+            x=intended_x,
+            y=intended_y,
+            z=wp.transform.location.z + 0.5,
+        )
+        spawn_tf = _carla.Transform(spawn_loc, wp.transform.rotation)
         try:
-            obstacle = world.try_spawn_actor(vehicle_bp, obstacle_transform)
+            obstacle = world.try_spawn_actor(vehicle_bp, spawn_tf)
             if obstacle:
-                actors.append(obstacle)
+                actors.append((obstacle, intended_x, intended_y))
                 logger.info(
-                    "Spawned obstacle at route fraction %.2f (idx %d/%d, lane %d)",
-                    frac, idx, n_wps, wp.lane_id,
+                    "Spawned obstacle at route fraction %.2f (idx %d/%d, lane %d) "
+                    "pos=(%.1f, %.1f)",
+                    frac, idx, n_wps, wp.lane_id, intended_x, intended_y,
                 )
         except Exception:
             pass
@@ -196,8 +204,13 @@ def spawn_obstacles_on_route(
 
 
 def destroy_obstacles(obstacles: list) -> None:
-    """Safely destroy all obstacle actors."""
-    for actor in obstacles:
+    """Safely destroy all obstacle actors.
+
+    Handles both plain actors and (actor, x, y) tuples from
+    spawn_obstacles_on_route.
+    """
+    for item in obstacles:
+        actor = item[0] if isinstance(item, tuple) else item
         try:
             actor.destroy()
         except Exception:

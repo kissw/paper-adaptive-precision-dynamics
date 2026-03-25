@@ -26,9 +26,12 @@ EVAL_ROUTES: dict[str, list[dict[str, Any]]] = {
     ],
     # Task B: intersection-free multi-lane routes for obstacle avoidance
     # Discovered via scripts/discover_routes.py on Town06_Opt
+    # Route 0: primary demonstration route (validated 80-100% SR)
+    # Route 1: longer variant with custom obstacle fractions
     "Town06_Opt_TaskB": [
         {"start": 0, "goal": 152, "desc": "Highway obstacle avoidance 373m 0turns"},
-        {"start": 1, "goal": 91, "desc": "Highway obstacle avoidance 669m 0turns"},
+        {"start": 22, "goal": 152, "desc": "Highway obstacle avoidance 518m 0turns",
+         "obstacle_fractions": [0.15, 0.45, 0.75]},
     ],
 }
 

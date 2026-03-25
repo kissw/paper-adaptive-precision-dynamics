@@ -92,8 +92,14 @@ class iCEMPlanner:
             self._adaptive_min_std = self._min_std
 
     @torch.no_grad()
-    def plan(self, initial_state, rssm, efe_scorer, pref_model, ensemble, state_decoder=None) -> PlanResult:
+    def plan(self, initial_state, rssm, efe_scorer, pref_model, ensemble, state_decoder=None, obstacle_info=None) -> PlanResult:
         device = initial_state.deter.device
+
+        # One-time warm-start reset when obstacle enters detection zone
+        # to break inertia from straight-driving trajectory
+        if obstacle_info is not None and obstacle_info.get("reset_warmstart", False):
+            self._prev_mean = None
+            self._adaptive_min_std = self._min_std * 2.0
 
         if self._warm_start and self._prev_mean is not None:
             mean = torch.zeros(self._horizon, self._action_dim, device=device)
@@ -104,6 +110,24 @@ class iCEMPlanner:
             # differentiate moving vs stopped trajectories.
             if self._accel_prior != 0.0 and self._action_dim >= 2:
                 mean[:, 1] = self._accel_prior
+
+        # AIF action prior modulation: obstacle observation shifts the
+        # steer prior from neutral to directional evasion.
+        # This is analogous to a reflexive motor prior — seeing an obstacle
+        # biases the action distribution toward the escape direction.
+        if obstacle_info is not None:
+            evasion_steer = obstacle_info.get("evasion_steer", 0.0)
+            obs_prox = obstacle_info.get("proximity", 0.0)
+            if evasion_steer != 0.0 and obs_prox > 0.05:
+                # Scale bias by proximity: stronger as obstacle gets closer
+                bias_strength = evasion_steer * min(obs_prox * 2.0, 1.0)
+                # Apply sustained bias across all horizon steps
+                mean[:, 0] = mean[:, 0] + bias_strength
+                # Also reduce throttle prior when evading
+                if self._action_dim >= 2:
+                    mean[:, 1] = mean[:, 1] - 0.15 * min(obs_prox * 2.0, 1.0)
+                mean = mean.clamp(-1.0, 1.0)
+
         std = torch.ones(self._horizon, self._action_dim, device=device)
 
         # Cold-start: use extra iterations when no warm-start prior exists.
@@ -114,7 +138,37 @@ class iCEMPlanner:
         # Cold-start: use more samples to better cover the action space
         n_total = self._n_samples * 2 if is_cold else self._n_samples
         n_keep = max(1, int(n_total * self._keep_fraction))
-        n_from_dist = n_total - n_keep
+
+        # Lane-change motor primitives: when obstacle detected with evasion
+        # direction, inject trajectory templates with sustained directional
+        # steer into the CEM population. This ensures the planner always
+        # has lane-change candidates for the penalty to select as elites.
+        # In AIF terms: motor primitives are pre-learned action sequences
+        # in the action prior repertoire.
+        n_templates = 0
+        template_actions = None
+        if obstacle_info is not None:
+            ev_s = obstacle_info.get("evasion_steer", 0.0)
+            ev_p = obstacle_info.get("proximity", 0.0)
+            if ev_s != 0.0 and ev_p > 0.05:
+                n_templates = max(1, int(n_total * 0.15))
+                template_actions = torch.zeros(n_templates, self._horizon, self._action_dim, device=device)
+                # S-curve lane change: steer → coast → counter-steer
+                H = self._horizon
+                phase1 = H // 3         # initiation
+                phase2 = 2 * H // 3     # coast
+                for i in range(n_templates):
+                    # Vary steer magnitude across templates
+                    mag = 0.3 + 0.4 * (i / max(n_templates - 1, 1))
+                    sign = 1.0 if ev_s > 0 else -1.0
+                    template_actions[i, :phase1, 0] = sign * mag
+                    template_actions[i, phase1:phase2, 0] = sign * mag * 0.3
+                    template_actions[i, phase2:, 0] = -sign * mag * 0.2
+                    # Moderate throttle (need speed for lane change)
+                    template_actions[i, :, 1] = 0.2
+                template_actions = template_actions.clamp(-1.0, 1.0)
+
+        n_from_dist = n_total - n_keep - n_templates
 
         for _ in range(iters):
             # Main population from elite distribution
@@ -133,10 +187,14 @@ class iCEMPlanner:
                 rand_noise = rand_noise * self._noise_scale.to(device)
             rand_actions = rand_noise.clamp(-1.0, 1.0)
 
-            actions = torch.cat([dist_actions, rand_actions], dim=0)
+            parts = [dist_actions, rand_actions]
+            if template_actions is not None:
+                parts.append(template_actions)
+            actions = torch.cat(parts, dim=0)
 
-            # Batch-parallel rollout: expand initial state to N samples
-            expanded = type(initial_state)(*[x.expand(n_total, -1) for x in initial_state])
+            # Batch-parallel rollout: expand initial state to match action count
+            n_actions = actions.shape[0]
+            expanded = type(initial_state)(*[x.expand(n_actions, -1) for x in initial_state])
             # actions [N, H, A] -> [H, N, A]
             trajectory = rssm.imagine(expanded, actions.permute(1, 0, 2))
 
@@ -144,12 +202,63 @@ class iCEMPlanner:
             means_list = [s.mean for s in trajectory]
             stds_list = [s.std for s in trajectory]
 
-            scores = efe_scorer.score(feats, means_list, stds_list, pref_model, ensemble, state_decoder)
+            scores = efe_scorer.score(feats, means_list, stds_list, pref_model, ensemble, state_decoder, obstacle_info)
+
+            # Action-prior obstacle avoidance: directional evasion penalty.
+            # In AIF terms: obstacle observation modulates the action prior
+            # from "prefer small steer" to "prefer steering in evasion direction".
+            # The penalty is DIRECTIONAL — it specifically rewards trajectories
+            # that steer toward the correct evasion side and penalizes wrong-way
+            # or straight trajectories. This breaks the left-right symmetry that
+            # causes CEM to oscillate.
+            if obstacle_info is not None:
+                obs_prox = obstacle_info.get("proximity", 0.0)
+                beta_o = obstacle_info.get("beta_obstacle", 3.0)
+                evasion_steer = obstacle_info.get("evasion_steer", 0.0)
+                if obs_prox > 0:
+                    H = actions.shape[1]  # horizon
+
+                    if evasion_steer != 0.0:
+                        # Directional penalty: penalize NOT steering in evasion direction
+                        evasion_sign = 1.0 if evasion_steer > 0 else -1.0
+                        cumul_steer = actions[:, :, 0].cumsum(dim=1)
+                        # Project final cumulative steer onto evasion direction
+                        final_evasion = cumul_steer[:, -1] * evasion_sign  # positive = correct
+                        # Score: 0→1 as cumulative steer reaches 3.0 in correct direction
+                        evasion_score = (final_evasion / 3.0).clamp(min=0.0, max=1.0)
+                        directional_penalty = (1.0 - evasion_score).pow(2)
+                    else:
+                        # Undirected fallback: penalize low absolute steer
+                        cumul_steer = actions[:, :, 0].cumsum(dim=1)
+                        max_lateral = cumul_steer.abs().max(dim=1).values
+                        mean_abs_steer = actions[:, :, 0].abs().mean(dim=1)
+                        lateral_score = (max_lateral / 0.5).clamp(max=1.0)
+                        sustained_score = (mean_abs_steer / 0.15).clamp(max=1.0)
+                        avoidance_score = (lateral_score * sustained_score).clamp(max=1.0)
+                        directional_penalty = (1.0 - avoidance_score).pow(2)
+
+                    # Throttle penalty: penalize high acceleration near obstacles
+                    mean_accel = actions[:, :, 1].mean(dim=1)
+                    speed_penalty = (mean_accel.clamp(min=0.0) / 0.3).clamp(max=1.0)
+
+                    combined = directional_penalty + 0.2 * speed_penalty
+                    scores = scores + obs_prox * beta_o * H * combined
 
             elite_idxs = scores.argsort()[: self._n_elites]
             elite_actions = actions[elite_idxs]
             mean = elite_actions.mean(dim=0)
             std = elite_actions.std(dim=0).clamp(min=self._adaptive_min_std)
+
+            # Re-inject evasion bias after elite update to prevent wash-out.
+            # The directional penalty selects correct-direction elites, and
+            # this bias keeps the mean shifted toward the evasion direction
+            # across CEM iterations (persistent action prior).
+            if obstacle_info is not None:
+                ev_s = obstacle_info.get("evasion_steer", 0.0)
+                ev_p = obstacle_info.get("proximity", 0.0)
+                if ev_s != 0.0 and ev_p > 0.05:
+                    bias = ev_s * min(ev_p * 2.0, 1.0) * 0.5
+                    mean[:, 0] = (mean[:, 0] + bias).clamp(-1.0, 1.0)
 
         self._prev_mean = mean.detach()
 
@@ -161,7 +270,7 @@ class iCEMPlanner:
         means_one = [s.mean for s in traj_one]
         stds_one = [s.std for s in traj_one]
 
-        efe_total = efe_scorer.score(feats_one, means_one, stds_one, pref_model, ensemble, state_decoder)
+        efe_total = efe_scorer.score(feats_one, means_one, stds_one, pref_model, ensemble, state_decoder, obstacle_info)
         epistemic_total = sum(
             ensemble.epistemic_uncertainty(f).item() for f in feats_one
         )

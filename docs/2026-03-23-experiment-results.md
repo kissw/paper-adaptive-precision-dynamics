@@ -316,9 +316,36 @@ src/active_inference/
 
 ---
 
+## Task B: Obstacle Avoidance via Lane Change (2026-03-25)
+
+Building on the validated Task A lane-keeping controller, Task B demonstrates obstacle avoidance through lane change — all within the AIF framework.
+
+### Approach: AIF Reflexive Steer Prior
+
+The obstacle avoidance uses a high-precision action prior that overrides CEM steer during evasion:
+- Forward-only obstacle proximity detection (40m range)
+- Lane-geometry evasion direction (CARLA `get_left_lane()`/`get_right_lane()` distances)
+- Lock persistence (committed lane change, reset when obstacle passed)
+- Lateral clearance suppression (resume CEM lane-keeping when clearance ≥ 4m)
+
+### Results
+
+| Route | Distance | Obstacles/ep | Episodes | SR | Avoidance | Completion | MLD |
+|-------|----------|-------------|----------|-----|-----------|-----------|------|
+| Route 0 (373m) | 373m | 2 | 5 | **100%** | **10/10** | 98.6% | 0.67m |
+| Route 1 (518m) | 518m | 3 | 3 | **100%** | **9/9** | 99.1% | 0.65m |
+| **Combined** | — | — | 8 | **100%** | **19/19** | **98.8%** | **0.66m** |
+
+Task A regression check: no degradation (81.2% completion unchanged on moderate curves).
+
+See [2026-03-25-task-b-obstacle-avoidance.md](2026-03-25-task-b-obstacle-avoidance.md) for full details.
+
+---
+
 ## Future Directions
 
 1. **Expand training data** to include sharper curves (Town03, Town04 intersections) for >85° heading change coverage.
 2. **Goal-directed preference** to address the highway junction navigation issue (baseline 28% wall).
-3. **Obstacle avoidance** via lane-change behavior — requires extending the preference model to encode multi-lane scenarios.
+3. **Learned obstacle detection** — replace runtime CARLA actor positions with visual obstacle detection from learned representations.
 4. **Online adaptation** — update world model and preference during evaluation for continual learning.
+5. **Curved-road obstacle avoidance** — validate Task B on roads with curvature.

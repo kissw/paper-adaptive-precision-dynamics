@@ -94,7 +94,7 @@ class DeepAIFAgent:
         self.planner.reset()
 
     @torch.no_grad()
-    def step_with_info(self, obs_img: Tensor, obs_state: Tensor) -> PlanResult:
+    def step_with_info(self, obs_img: Tensor, obs_state: Tensor, obstacle_info: dict | None = None) -> PlanResult:
         if self._prev_state is None:
             self.reset()
 
@@ -133,6 +133,23 @@ class DeepAIFAgent:
             self.efe_scorer._beta_s = self._cfg.efe.beta_state
             self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental
 
+        # Enrich obstacle_info with current crosstrack and beta for penalties
+        if obstacle_info is not None:
+            if "initial_crosstrack" not in obstacle_info:
+                obstacle_info["initial_crosstrack"] = crosstrack_err
+            if "beta_obstacle" not in obstacle_info:
+                obstacle_info["beta_obstacle"] = getattr(self._cfg.efe, "beta_obstacle", 3.0)
+
+            # AIF precision-weighting: obstacle proximity reduces trust in
+            # the learned preference (trained on straight driving).
+            # This lets the obstacle action prior dominate the CEM scoring
+            # when evasion is needed. Without this, the preference model's
+            # EFE for straight driving overwhelms the obstacle penalty.
+            obs_prox = obstacle_info.get("proximity", 0.0)
+            if obs_prox > 0.1:
+                suppress = max(0.2, 1.0 - obs_prox * 0.8)
+                self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental * suppress
+
         plan_result = self.planner.plan(
             post,
             self.world_model.rssm,
@@ -140,6 +157,7 @@ class DeepAIFAgent:
             self.preference,
             self.world_model.ensemble,
             self.world_model.state_decoder,
+            obstacle_info,
         )
 
         self._prev_state = post
@@ -147,8 +165,8 @@ class DeepAIFAgent:
         return plan_result
 
     @torch.no_grad()
-    def step(self, obs_img: Tensor, obs_state: Tensor) -> Tensor:
-        return self.step_with_info(obs_img, obs_state).action
+    def step(self, obs_img: Tensor, obs_state: Tensor, obstacle_info: dict | None = None) -> Tensor:
+        return self.step_with_info(obs_img, obs_state, obstacle_info).action
 
     def update(self, images: Tensor, states: Tensor, actions: Tensor) -> dict[str, float]:
         # Per-timestep backward with NaN guard, AMP, and CUDA error recovery
