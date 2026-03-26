@@ -190,6 +190,8 @@ def main():
                 locked_obstacle_pos = None  # Position of obstacle being evaded
                 locked_min_dist = float("inf")  # Closest approach to locked obstacle
                 OBSTACLE_PASS_RADIUS = 12.0  # metres to consider "at" obstacle
+                centering_active = False  # Post-evasion centering toward route lane
+                route_lane_id = None  # Lane ID at episode start (route center)
 
                 # Per-frame JSONL trajectory file
                 traj_file = traj_dir / f"trajectory_{args.task}_r{ri}_ep{ep}.jsonl"
@@ -197,6 +199,13 @@ def main():
 
                 try:
                     state_dim = cfg.encoder.state_dim
+
+                    # Record route lane ID at episode start
+                    ego_wp = env._world.get_map().get_waypoint(
+                        env._vehicle.get_location()
+                    )
+                    if ego_wp is not None:
+                        route_lane_id = ego_wp.lane_id
 
                     for t in range(args.max_frames):
                         # Augment state to match model state_dim
@@ -214,6 +223,17 @@ def main():
                             state = np.append(state, [obs_dist_norm] * (state_dim - len(state)))
                         img_tensor = torch.tensor(img, dtype=torch.float32)
                         state_tensor = torch.tensor(state, dtype=torch.float32)
+
+                        # Post-evasion centering: deactivate when back in route lane
+                        if centering_active and route_lane_id is not None:
+                            ctr_wp = env._world.get_map().get_waypoint(
+                                env._vehicle.get_location()
+                            )
+                            if ctr_wp is not None and ctr_wp.lane_id == route_lane_id:
+                                centering_active = False
+                                if t % 20 == 0:
+                                    print(f"  [center] t={t} back in route lane"
+                                          f" {route_lane_id}, centering OFF")
 
                         # Compute runtime obstacle info for EFE lane-change penalty
                         # Only consider obstacles AHEAD of vehicle (forward dot product > 0)
@@ -257,6 +277,7 @@ def main():
                                     locked_evasion_dir = None
                                     locked_obstacle_pos = None
                                     locked_min_dist = float("inf")
+                                    centering_active = True
 
                             # Proximity ramp: 1.0 at 0m, 0.0 at 40m+
                             if min_fwd_d < 40.0:
@@ -316,11 +337,13 @@ def main():
                                         locked_evasion_dir = evasion_steer
                                         locked_obstacle_pos = (closest_ox, closest_oy)
                                         locked_min_dist = min_fwd_d
+                                        centering_active = False  # New obstacle, stop centering
 
                                 obstacle_info = {
                                     "proximity": prox,
                                     "reset_warmstart": do_reset,
                                     "evasion_steer": evasion_steer,
+                                    "centering": centering_active,
                                 }
                                 if t % 20 == 0:
                                     print(f"  [obs] t={t} fwd_dist={min_fwd_d:.1f}m prox={prox:.2f} evade={evasion_steer:+.1f}")
@@ -353,6 +376,15 @@ def main():
                                 if t % 20 == 0:
                                     print(f"  [obs] t={t} CLEARED lat={lat_clear:.1f}m, suppressing evasion")
                                 obstacle_info["evasion_steer"] = 0.0
+
+                        # Pass centering signal even when no obstacle is active
+                        if centering_active and obstacle_info is None:
+                            obstacle_info = {
+                                "proximity": 0.0, "evasion_steer": 0.0,
+                                "centering": True,
+                            }
+                            if t % 40 == 0:
+                                print(f"  [center] t={t} centering active, beta_state boost")
 
                         plan_result = agent.step_with_info(img_tensor, state_tensor, obstacle_info)
                         action = plan_result.action

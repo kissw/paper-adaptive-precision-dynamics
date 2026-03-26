@@ -133,6 +133,19 @@ class DeepAIFAgent:
             self.efe_scorer._beta_s = self._cfg.efe.beta_state
             self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental
 
+        # Post-evasion centering: temporarily activate crosstrack penalty
+        # to pull ego back toward route lane center after passing an obstacle.
+        if obstacle_info is not None and obstacle_info.get("centering", False):
+            self.efe_scorer._beta_s = 0.5  # activate crosstrack centering
+            self.efe_scorer._heading_only_state = False  # penalize crosstrack, not just heading
+        else:
+            # Restore Task B defaults (may be overridden by adaptive precision above)
+            if not (state_error > 0.3):
+                self.efe_scorer._beta_s = self._cfg.efe.beta_state
+            self.efe_scorer._heading_only_state = getattr(
+                self._cfg.efe, "heading_only_state", False,
+            )
+
         # Enrich obstacle_info with current crosstrack and beta for penalties
         if obstacle_info is not None:
             if "initial_crosstrack" not in obstacle_info:
