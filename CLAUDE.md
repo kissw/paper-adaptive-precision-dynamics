@@ -13,6 +13,8 @@ Deep Active Inference agent for autonomous driving in CARLA 0.9.16. Uses Expecte
 
 ### Outputs
 
+Save chase and onboard videos as you evaluate the model.
+
 Naming convention:
 - `train_v{#}_{desc}/` — trained model (checkpoints, logs). Add `task_{a/b}` prefix only when task-specific.
 - `eval_task_{a/b}_v{#}_{desc}/` — evaluations, trajectories, and videos (chase, onboard).
