@@ -35,7 +35,7 @@ EVAL_ROUTES: dict[str, list[dict[str, Any]]] = {
          "obstacle_fractions": [0.15, 0.45, 0.75]},
         {"start": 22, "goal": 152, "desc": "Highway alternating obstacles 518m 0turns",
          "obstacle_fractions": [0.15, 0.45, 0.75],
-         "lane_offsets": [0, 1, 0]},
+         "lane_offsets": [0, 3, 0]},
     ],
 }
 
