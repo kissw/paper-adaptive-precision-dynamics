@@ -94,11 +94,15 @@ class DeepAIFAgent:
         self.planner.reset()
 
     @torch.no_grad()
-    def step_with_info(self, obs_img: Tensor, obs_state: Tensor, obstacle_info: dict | None = None) -> PlanResult:
+    def step_with_info(
+        self,
+        obs_img: Tensor,
+        obs_state: Tensor,
+        obstacle_info: dict | None = None,
+    ) -> PlanResult:
         if self._prev_state is None:
             self.reset()
 
-        # Full 4D state [speed, steer, heading_error, crosstrack_error] to encoder
         img = (
             obs_img.unsqueeze(0).to(self._device)
             if obs_img.dim() == 3
@@ -111,57 +115,32 @@ class DeepAIFAgent:
         )
 
         embed = self.world_model.encoder(img, st)
-        post, _ = self.world_model.rssm.obs_step(self._prev_state, self._prev_action, embed)
+        post, _ = self.world_model.rssm.obs_step(
+            self._prev_state, self._prev_action, embed,
+        )
 
         # AIF precision-weighting: observed state error modulates
-        # both action prior precision and EFE channel weights.
-        # High error → wider exploration + trust state decoder over preference.
+        # action prior precision and EFE channel weights.
         heading_err = float(st[0, 2]) if st.dim() == 2 else float(st[2])
-        crosstrack_err = float(st[0, 3]) if st.dim() == 2 else float(st[3])
+        crosstrack_err = (
+            float(st[0, 3]) if st.dim() == 2 else float(st[3])
+        )
         state_error = heading_err ** 2 + crosstrack_err ** 2
-        self.planner.set_state_context(heading_err, crosstrack_err, state_error)
+        self.planner.set_state_context(
+            heading_err, crosstrack_err, state_error,
+        )
 
-        # Adaptive EFE precision: when state error is high, the preference
-        # model operates on OOD latents (it was trained on centered driving).
-        # Increase state penalty weight (direct observation, reliable) and
-        # decrease preference weight (model-based, unreliable at OOD states).
+        # Adaptive EFE precision: high state error → trust state decoder
+        # over preference model (which is OOD for off-center states).
         if state_error > 0.3:
             boost = min(4.0, 1.0 + (state_error - 0.3) * 4.0)
             self.efe_scorer._beta_s = self._cfg.efe.beta_state * boost
-            self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental / boost
+            self.efe_scorer._beta_i = (
+                self._cfg.efe.beta_instrumental / boost
+            )
         else:
             self.efe_scorer._beta_s = self._cfg.efe.beta_state
             self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental
-
-        # Post-evasion centering: temporarily activate crosstrack penalty
-        # to pull ego back toward route lane center after passing an obstacle.
-        if obstacle_info is not None and obstacle_info.get("centering", False):
-            self.efe_scorer._beta_s = 0.5  # activate crosstrack centering
-            self.efe_scorer._heading_only_state = False  # penalize crosstrack, not just heading
-        else:
-            # Restore Task B defaults (may be overridden by adaptive precision above)
-            if not (state_error > 0.3):
-                self.efe_scorer._beta_s = self._cfg.efe.beta_state
-            self.efe_scorer._heading_only_state = getattr(
-                self._cfg.efe, "heading_only_state", False,
-            )
-
-        # Enrich obstacle_info with current crosstrack and beta for penalties
-        if obstacle_info is not None:
-            if "initial_crosstrack" not in obstacle_info:
-                obstacle_info["initial_crosstrack"] = crosstrack_err
-            if "beta_obstacle" not in obstacle_info:
-                obstacle_info["beta_obstacle"] = getattr(self._cfg.efe, "beta_obstacle", 3.0)
-
-            # AIF precision-weighting: obstacle proximity reduces trust in
-            # the learned preference (trained on straight driving).
-            # This lets the obstacle action prior dominate the CEM scoring
-            # when evasion is needed. Without this, the preference model's
-            # EFE for straight driving overwhelms the obstacle penalty.
-            obs_prox = obstacle_info.get("proximity", 0.0)
-            if obs_prox > 0.1:
-                suppress = max(0.2, 1.0 - obs_prox * 0.8)
-                self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental * suppress
 
         plan_result = self.planner.plan(
             post,
@@ -170,7 +149,6 @@ class DeepAIFAgent:
             self.preference,
             self.world_model.ensemble,
             self.world_model.state_decoder,
-            obstacle_info,
         )
 
         self._prev_state = post
@@ -178,8 +156,13 @@ class DeepAIFAgent:
         return plan_result
 
     @torch.no_grad()
-    def step(self, obs_img: Tensor, obs_state: Tensor, obstacle_info: dict | None = None) -> Tensor:
-        return self.step_with_info(obs_img, obs_state, obstacle_info).action
+    def step(
+        self,
+        obs_img: Tensor,
+        obs_state: Tensor,
+        obstacle_info: dict | None = None,
+    ) -> Tensor:
+        return self.step_with_info(obs_img, obs_state).action
 
     def update(self, images: Tensor, states: Tensor, actions: Tensor) -> dict[str, float]:
         # Per-timestep backward with NaN guard, AMP, and CUDA error recovery

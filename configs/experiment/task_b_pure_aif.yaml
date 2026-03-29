@@ -1,0 +1,68 @@
+# Task B Pure AIF: Vision-based obstacle avoidance via EFE minimization
+#
+# No privileged obstacle coordinates. Obstacle avoidance emerges from:
+# 1. Instrumental value: GMM preference (fitted on obstacle-free data)
+#    assigns low probability to obstacle-present latents
+# 2. State-space penalty: heading + crosstrack centering in current lane
+# 3. World model trained on obstacle-encounter data learns obstacle dynamics
+#
+# Key differences from task_b_v5.yaml:
+# - beta_obstacle: 0.0 (no runtime obstacle penalty)
+# - beta_state: 0.3 (non-zero: centering in current lane)
+# - heading_only_state: false (full heading + crosstrack penalty)
+# - K: 5 (fitted on obstacle-free data only)
+
+seed: 42
+device: cuda
+
+training:
+  batch_size: 64
+
+encoder:
+  image_channels: 3
+  image_size: 64
+  state_dim: 4
+  crop_road: true
+
+rssm:
+  deter_dim: 256
+  stoch_dim: 64
+  embed_dim: 256
+  min_std: 0.1
+
+cem:
+  horizon: 15
+  n_samples: 500
+  n_elites: 50
+  n_iters: 5
+  colored_noise_beta: 1.0
+  warm_start: true
+  action_dim: 2
+  noise_scale: [1.0, 0.6]
+  accel_prior: 0.2
+  cold_start_extra_iters: 5
+  min_std: 0.1
+  keep_fraction: 0.2
+  warm_start_reset_threshold: 4.0
+
+preference:
+  K: 5
+  min_std: 0.01
+  update_interval: 1
+  warmup_epoch: 10
+  fit_iters: 300
+  fit_lr: 0.005
+  max_samples: 5000
+
+efe:
+  beta_instrumental: 1.0
+  beta_epistemic: 0.1
+  beta_state: 0.3
+  beta_obstacle: 0.0
+  mc_samples: 32
+  temporal_discount: 0.95
+  heading_only_state: false
+
+evaluation:
+  towns:
+    task_b: Town06_Opt
