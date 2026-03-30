@@ -142,6 +142,21 @@ class DeepAIFAgent:
             self.efe_scorer._beta_s = self._cfg.efe.beta_state
             self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental
 
+        # Visual surprise: compute reconstruction error on current
+        # observation. High error = unexpected visual (obstacle).
+        # Pass to EFE scorer so imagined trajectories that keep the
+        # obstacle in view are penalized.
+        feat = self.world_model.rssm.get_feat(post)
+        recon_img = self.world_model.obs_decoder(feat)
+        recon_error = float(
+            (recon_img - img).pow(2).sum(dim=(1, 2, 3)).item()
+        )
+        visual_info = {
+            "recon_error": recon_error,
+            "ref_image": img.detach(),
+            "obs_decoder": self.world_model.obs_decoder,
+        }
+
         plan_result = self.planner.plan(
             post,
             self.world_model.rssm,
@@ -149,6 +164,7 @@ class DeepAIFAgent:
             self.preference,
             self.world_model.ensemble,
             self.world_model.state_decoder,
+            visual_info,
         )
 
         self._prev_state = post

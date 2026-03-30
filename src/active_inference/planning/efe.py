@@ -32,10 +32,13 @@ class EFEScorer:
         self._beta_i = beta_instrumental
         self._beta_e = beta_epistemic
         self._beta_s = beta_state
-        self._beta_o = beta_obstacle  # kept for config compat, unused in pure AIF
+        self._beta_o = beta_obstacle  # kept for config compat
         self._mc_samples = mc_samples
         self._gamma = temporal_discount
         self._heading_only_state = heading_only_state
+        # Visual surprise: reconstruction error as obstacle signal
+        self._beta_surprise = 2.0  # weight for visual surprise penalty
+        self._surprise_threshold = 350.0  # recon error above this = surprise
 
     def instrumental_value(
         self, q_mean: Tensor, q_std: Tensor, pref_model: PreferenceModel
@@ -80,6 +83,35 @@ class EFEScorer:
         heading_err = decoded[:, 2]
         return heading_err.pow(2).clamp(max=4.0)  # [B]
 
+    def visual_surprise(
+        self, obs_decoder, feat: Tensor, ref_image: Tensor,
+    ) -> Tensor:
+        """Visual surprise via imagined reconstruction error.
+
+        Decodes imagined features to predicted images and compares
+        against a reference image (current observation). Trajectories
+        where the decoded image stays similar to a high-surprise
+        observation (obstacle in view) score high; trajectories where
+        the decoded image diverges (obstacle exits view after lane
+        change) score lower.
+
+        In AIF terms: this is the expected observation-level free energy.
+        The agent prefers futures where its predicted observations match
+        its prior preference (obstacle-free road).
+        """
+        decoded_img = obs_decoder(feat)  # [B, C, H, W]
+        # ref_image is [1, C, H, W] — expand to batch
+        ref = ref_image.expand_as(decoded_img)
+        # Per-sample MSE: high when decoded image looks like current
+        # (obstacle-containing) observation
+        mse = (decoded_img - ref).pow(2).sum(dim=(1, 2, 3))
+        # Invert: we WANT trajectories that diverge from the obstacle
+        # image. Low divergence (similar to obstacle image) = high penalty.
+        # Normalize by image dimensions for stability.
+        n_pixels = ref.shape[1] * ref.shape[2] * ref.shape[3]
+        similarity = (-mse / n_pixels).exp()  # 0-1, high = similar
+        return similarity.clamp(max=1.0)  # [B], lower = better
+
     def epistemic_value_ensemble(
         self, ensemble: EnsembleTransitionHeads, feat: Tensor,
     ) -> Tensor:
@@ -107,11 +139,21 @@ class EFEScorer:
         # trajectory_feats: list of [B, feat_dim], len=horizon
         # trajectory_means: list of [B, stoch_dim]
         # trajectory_stds: list of [B, stoch_dim]
-        # obstacle_info: ignored in pure AIF (kept for API compat)
+        # obstacle_info: dict with 'recon_error' (float) and
+        #   'ref_image' (Tensor) for visual surprise scoring
         # Returns: [B] total EFE (lower = better)
         B = trajectory_feats[0].shape[0]
         device = trajectory_feats[0].device
         total = torch.zeros(B, device=device)
+
+        # Extract visual surprise context if available
+        recon_error = 0.0
+        ref_image = None
+        obs_decoder = None
+        if obstacle_info is not None:
+            recon_error = obstacle_info.get("recon_error", 0.0)
+            ref_image = obstacle_info.get("ref_image", None)
+            obs_decoder = obstacle_info.get("obs_decoder", None)
 
         for t, (feat, mean, std) in enumerate(
             zip(trajectory_feats, trajectory_means, trajectory_stds)
@@ -132,6 +174,25 @@ class EFEScorer:
 
             discount = self._gamma ** t
             step_score = self._beta_i * instr - self._beta_e * epist
+
+            # Visual surprise penalty: when current observation has
+            # high reconstruction error (obstacle detected), penalize
+            # imagined trajectories whose decoded images stay similar
+            # to the current observation. This drives the agent toward
+            # actions that change the visual scene (lane change).
+            if (obs_decoder is not None
+                    and ref_image is not None
+                    and recon_error > self._surprise_threshold):
+                surprise = self.visual_surprise(
+                    obs_decoder, feat, ref_image,
+                )
+                # Scale by how surprising the current observation is
+                surprise_weight = min(
+                    recon_error / self._surprise_threshold - 1.0, 3.0,
+                )
+                step_score = step_score + (
+                    self._beta_surprise * surprise_weight * surprise
+                )
 
             # State-space penalty: raw (NOT z-scored) to avoid amplifying
             # noisy state decoder predictions during open-loop imagination.

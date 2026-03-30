@@ -129,14 +129,254 @@
   "hotPaths": [
     {
       "path": "scripts/evaluate.py",
-      "accessCount": 15,
-      "lastAccessed": 1774506447659,
+      "accessCount": 24,
+      "lastAccessed": 1774793862722,
       "type": "file"
     },
     {
       "path": "src/active_inference/agent.py",
+      "accessCount": 13,
+      "lastAccessed": 1774841899820,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/planning/efe.py",
+      "accessCount": 9,
+      "lastAccessed": 1774841863078,
+      "type": "file"
+    },
+    {
+      "path": "paper/main.tex",
+      "accessCount": 6,
+      "lastAccessed": 1774527342346,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/planning/cem_planner.py",
+      "accessCount": 5,
+      "lastAccessed": 1774793771383,
+      "type": "file"
+    },
+    {
+      "path": "configs/experiment/task_b_pure_aif.yaml",
       "accessCount": 4,
-      "lastAccessed": 1774506454603,
+      "lastAccessed": 1774840430041,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/evaluation/routes.py",
+      "accessCount": 3,
+      "lastAccessed": 1774535786669,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/models/rssm.py",
+      "accessCount": 3,
+      "lastAccessed": 1774791751443,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/training/preference.py",
+      "accessCount": 3,
+      "lastAccessed": 1774791752363,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/evaluation/obstacles.py",
+      "accessCount": 3,
+      "lastAccessed": 1774791758103,
+      "type": "file"
+    },
+    {
+      "path": "scripts/collect_data.py",
+      "accessCount": 3,
+      "lastAccessed": 1774793694280,
+      "type": "file"
+    },
+    {
+      "path": "configs/experiment/task_b_v5.yaml",
+      "accessCount": 3,
+      "lastAccessed": 1774793695729,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_b_v5_r2_centering/eval_results.csv",
+      "accessCount": 2,
+      "lastAccessed": 1774525110957,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_b_v5_r1_centering_regress/eval_results.csv",
+      "accessCount": 2,
+      "lastAccessed": 1774525111875,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_a_v10_moderate/eval_results.csv",
+      "accessCount": 2,
+      "lastAccessed": 1774525112383,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_b_v5_r0/eval_results.csv",
+      "accessCount": 2,
+      "lastAccessed": 1774525117870,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_b_v5_r1_video/eval_results.csv",
+      "accessCount": 2,
+      "lastAccessed": 1774525118770,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_a_v10_baseline/eval_results.csv",
+      "accessCount": 2,
+      "lastAccessed": 1774525119088,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/training/losses.py",
+      "accessCount": 2,
+      "lastAccessed": 1774791393075,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/models/encoder.py",
+      "accessCount": 2,
+      "lastAccessed": 1774791750559,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/models/decoder.py",
+      "accessCount": 2,
+      "lastAccessed": 1774791751001,
+      "type": "file"
+    },
+    {
+      "path": "scripts/collect_task_b_data.py",
+      "accessCount": 2,
+      "lastAccessed": 1774791759170,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/data/carla_env.py",
+      "accessCount": 2,
+      "lastAccessed": 1774791764610,
+      "type": "file"
+    },
+    {
+      "path": "configs/default.yaml",
+      "accessCount": 2,
+      "lastAccessed": 1774791764672,
+      "type": "file"
+    },
+    {
+      "path": "scripts/train.py",
+      "accessCount": 2,
+      "lastAccessed": 1774791769967,
+      "type": "file"
+    },
+    {
+      "path": "docs/experiment-results.md",
+      "accessCount": 1,
+      "lastAccessed": 1774525066550,
+      "type": "file"
+    },
+    {
+      "path": "docs/system-design.md",
+      "accessCount": 1,
+      "lastAccessed": 1774525066713,
+      "type": "file"
+    },
+    {
+      "path": "docs/plans/multi-active-lane-change.md",
+      "accessCount": 1,
+      "lastAccessed": 1774525066801,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1774525067479,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_b_v5_r0_video/eval_results.csv",
+      "accessCount": 1,
+      "lastAccessed": 1774525075338,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_b_v5_r2_alternating/eval_results.csv",
+      "accessCount": 1,
+      "lastAccessed": 1774525075931,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_b_v5_r2_alternating_v2/eval_results.csv",
+      "accessCount": 1,
+      "lastAccessed": 1774525076126,
+      "type": "file"
+    },
+    {
+      "path": "outputs/eval_task_b_v5_r0_centering_regress/eval_results.csv",
+      "accessCount": 1,
+      "lastAccessed": 1774525076572,
+      "type": "file"
+    },
+    {
+      "path": "paper/references.bib",
+      "accessCount": 1,
+      "lastAccessed": 1774525342044,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/data/dataset.py",
+      "accessCount": 1,
+      "lastAccessed": 1774791406914,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 1,
+      "lastAccessed": 1774791738055,
+      "type": "file"
+    },
+    {
+      "path": "HANDOFF.md",
+      "accessCount": 1,
+      "lastAccessed": 1774791738526,
+      "type": "file"
+    },
+    {
+      "path": "IMPLEMENTATION_PLAN.md",
+      "accessCount": 1,
+      "lastAccessed": 1774791738930,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/config.py",
+      "accessCount": 1,
+      "lastAccessed": 1774791756823,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/models/ensemble.py",
+      "accessCount": 1,
+      "lastAccessed": 1774791763695,
+      "type": "file"
+    },
+    {
+      "path": "scripts/collect_obstacle_data.py",
+      "accessCount": 1,
+      "lastAccessed": 1774793924907,
+      "type": "file"
+    },
+    {
+      "path": "scripts/collect_obstacle_data_v2.py",
+      "accessCount": 1,
+      "lastAccessed": 1774840493749,
       "type": "file"
     }
   ],
