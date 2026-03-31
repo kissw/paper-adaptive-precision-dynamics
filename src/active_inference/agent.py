@@ -299,6 +299,32 @@ class DeepAIFAgent:
             self.preference.logits.data[:k].copy_(pref["logits"][:k])
             print(f"  Preference K mismatch: {ckpt_K} -> {model_K} (partial load, refit needed)")
 
+        # Load contrastive preference if available — replaces standard GMM
+        if "contrastive_preference" in ckpt:
+            from active_inference.training.preference import (
+                ContrastivePreferenceModel,
+            )
+            cp = ckpt["contrastive_preference"]
+            contrastive = ContrastivePreferenceModel(
+                K_clean=cp["K_clean"],
+                K_avoid=cp["K_avoid"],
+                latent_dim=self._cfg.rssm.stoch_dim,
+                contrast_scale=cp["contrast_scale"],
+            ).to(self._device)
+            contrastive.clean.means.data.copy_(cp["clean_means"])
+            contrastive.clean.log_stds.data.copy_(cp["clean_log_stds"])
+            contrastive.clean.logits.data.copy_(cp["clean_logits"])
+            contrastive.avoid.means.data.copy_(cp["avoid_means"])
+            contrastive.avoid.log_stds.data.copy_(cp["avoid_log_stds"])
+            contrastive.avoid.logits.data.copy_(cp["avoid_logits"])
+            # Replace preference with contrastive model (same log_prob API)
+            self.preference = contrastive
+            print(
+                f"  Loaded contrastive preference "
+                f"(K_clean={cp['K_clean']}, K_avoid={cp['K_avoid']}, "
+                f"scale={cp['contrast_scale']})"
+            )
+
     def _load_with_state_dim_surgery(self, ckpt_state_dict: dict):
         """Load checkpoint with mismatched state_dim by padding new dimensions."""
         model_sd = self.world_model.state_dict()

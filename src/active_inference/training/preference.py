@@ -65,3 +65,77 @@ class PreferenceModel(nn.Module):
         self.means.data.copy_(state["means"])
         self.log_stds.data.copy_(state["log_stds"])
         self.logits.data.copy_(state["logits"])
+
+
+class ContrastivePreferenceModel(nn.Module):
+    """Contrastive preference via log-ratio of two GMMs.
+
+    Computes log p_clean(z) - log p_avoid(z) as the preference signal.
+    States that look like obstacle-free driving get high scores;
+    states that look like obstacle-present driving get low scores.
+
+    In AIF terms: this encodes a prior preference that contrasts
+    "what I expect to see" (clean road) against "what I want to avoid"
+    (obstacle ahead). The log-ratio naturally separates the two
+    distributions even when a single GMM cannot.
+    """
+
+    def __init__(
+        self,
+        K_clean: int = 5,
+        K_avoid: int = 5,
+        latent_dim: int = 64,
+        min_std: float = 0.01,
+        contrast_scale: float = 1.0,
+    ):
+        super().__init__()
+        self.clean = PreferenceModel(
+            K=K_clean, latent_dim=latent_dim, min_std=min_std,
+        )
+        self.avoid = PreferenceModel(
+            K=K_avoid, latent_dim=latent_dim, min_std=min_std,
+        )
+        self._contrast_scale = contrast_scale
+
+    def log_prob(self, z: Tensor) -> Tensor:
+        """Log-ratio preference: positive for clean, negative for obstacle.
+
+        Returns log p_clean(z) - contrast_scale * log p_avoid(z).
+        Higher = more preferred (obstacle-free).
+        """
+        return (
+            self.clean.log_prob(z)
+            - self._contrast_scale * self.avoid.log_prob(z)
+        )
+
+    def fit(
+        self,
+        clean_latents: Tensor,
+        avoid_latents: Tensor,
+        n_iters: int = 300,
+        lr: float = 0.01,
+    ):
+        """Fit both GMMs independently on their respective latents."""
+        print(f"Fitting clean GMM (K={self.clean._K}) on "
+              f"{clean_latents.shape[0]} latents...")
+        self.clean.update_from_latents(clean_latents, n_iters, lr)
+
+        print(f"Fitting avoid GMM (K={self.avoid._K}) on "
+              f"{avoid_latents.shape[0]} latents...")
+        self.avoid.update_from_latents(avoid_latents, n_iters, lr)
+
+        # Diagnostic: check separation
+        with torch.no_grad():
+            clean_lp_clean = self.clean.log_prob(clean_latents).mean()
+            clean_lp_avoid = self.avoid.log_prob(clean_latents).mean()
+            avoid_lp_clean = self.clean.log_prob(avoid_latents).mean()
+            avoid_lp_avoid = self.avoid.log_prob(avoid_latents).mean()
+            ratio_clean = (clean_lp_clean - clean_lp_avoid).item()
+            ratio_avoid = (avoid_lp_clean - avoid_lp_avoid).item()
+            print(f"\nContrastive preference diagnostic:")
+            print(f"  Clean latents:    log-ratio = {ratio_clean:+.2f} "
+                  f"(should be positive)")
+            print(f"  Obstacle latents: log-ratio = {ratio_avoid:+.2f} "
+                  f"(should be negative)")
+            print(f"  Separation gap:   {ratio_clean - ratio_avoid:.2f} "
+                  f"nats")

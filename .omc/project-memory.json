@@ -135,14 +135,14 @@
     },
     {
       "path": "src/active_inference/agent.py",
-      "accessCount": 13,
-      "lastAccessed": 1774841899820,
+      "accessCount": 15,
+      "lastAccessed": 1774961962872,
       "type": "file"
     },
     {
       "path": "src/active_inference/planning/efe.py",
-      "accessCount": 9,
-      "lastAccessed": 1774841863078,
+      "accessCount": 10,
+      "lastAccessed": 1774961863820,
       "type": "file"
     },
     {
@@ -155,6 +155,12 @@
       "path": "src/active_inference/planning/cem_planner.py",
       "accessCount": 5,
       "lastAccessed": 1774793771383,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/training/preference.py",
+      "accessCount": 5,
+      "lastAccessed": 1774961916874,
       "type": "file"
     },
     {
@@ -173,12 +179,6 @@
       "path": "src/active_inference/models/rssm.py",
       "accessCount": 3,
       "lastAccessed": 1774791751443,
-      "type": "file"
-    },
-    {
-      "path": "src/active_inference/training/preference.py",
-      "accessCount": 3,
-      "lastAccessed": 1774791752363,
       "type": "file"
     },
     {
@@ -377,6 +377,12 @@
       "path": "scripts/collect_obstacle_data_v2.py",
       "accessCount": 1,
       "lastAccessed": 1774840493749,
+      "type": "file"
+    },
+    {
+      "path": "scripts/fit_contrastive_preference.py",
+      "accessCount": 1,
+      "lastAccessed": 1774961945977,
       "type": "file"
     }
   ],
