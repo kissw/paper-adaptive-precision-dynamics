@@ -370,6 +370,61 @@ The centering mechanism (Section~III-F) activates after each obstacle lock is re
 
 Without centering, the ego remains at Y$\approx$45 after the first evasion and passively clears subsequent obstacles in alternating lanes with $\sim$4m margin---no active maneuvers. With centering, each obstacle requires an independent evasion decision, producing 6 active lane changes per episode.
 
+\subsection{Toward Pure Vision-Based Obstacle Avoidance}
+
+The Task~B results above rely on runtime obstacle coordinates
+(privileged information). We investigated whether obstacle avoidance
+can emerge purely from EFE minimization using visual input alone---no
+ground-truth positions, no hardcoded evasion logic. Six privileged
+mechanisms were removed and replaced with pure EFE scoring
+(instrumental + epistemic + state-space). Table~\ref{tab:pure_aif}
+summarizes the investigation.
+
+\begin{table}[t]
+\centering
+\caption{Pure AIF Obstacle Avoidance: Preference Gap Analysis}
+\label{tab:pure_aif}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Variant} & \textbf{GMM Gap} & \textbf{Recon.} & \textbf{Avoid} \\
+ & (nats) & ratio & \\
+\midrule
+64$\times$64 RGB & $-$24.6 & 1.62$\times$ & 0\% \\
+128$\times$128 RGB & $-$2.3 & 1.91$\times$ & 0\% \\
+64$\times$64 RGBD & $-$68.1 & 1.35$\times$ & 0\% \\
+Contrastive (s=1.0) & +37.0 & --- & 0\% \\
+Contrastive (s=0.1) & +1.0 & --- & 0\% \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small{GMM Gap = $\log p(z_{\text{clean}}) - \log p(z_{\text{obs}})$.
+Positive = correct direction. Contrastive uses log-ratio of two GMMs.}
+\end{table}
+
+\textbf{Key finding:} A single GMM fitted on obstacle-free data
+assigns \emph{higher} probability to obstacle-present latents
+(inverted gap), regardless of resolution or input modality. The RSSM
+latent space encodes driving dynamics (speed, steering, lane position)
+rather than scene content (obstacle presence). A contrastive
+preference model (log-ratio of two GMMs) achieves correct separation
+(+37 nats) at the filtering level, but the RSSM's imagination
+(\texttt{img\_step}) cannot predict obstacle appearance or
+disappearance from steering actions, making the signal unexploitable
+during CEM planning.
+
+\textbf{Positive result:} The 128$\times$128 model achieves
+100\% success rate with 0.17m MLD and zero offroad events---the best
+pure-AIF driver, though without obstacle avoidance.
+
+\textbf{Implication:} Pure vision-based AIF obstacle avoidance via
+EFE minimization requires a world model that can \emph{imagine
+obstacle dynamics}---predicting how obstacles enter and exit the
+visual field as a function of steering actions. This requires either
+high-quality obstacle avoidance demonstrations (collision-free lane
+changes) for world model training, auxiliary obstacle prediction
+losses, or object-centric architectures that separate obstacles from
+background in the latent representation.
+
 %----------------------------------------------------------------------
 \section{Discussion}
 \label{sec:discussion}
@@ -402,7 +457,7 @@ Unlike RL-based driving agents, our system:
 
 \textbf{Sharp curves.} The agent fails beyond $\sim$85\degree{} heading change, limited by the training data distribution (Town04 curves up to $\sim$85\degree{}).
 
-\textbf{Obstacle detection.} Current obstacle detection uses runtime Euclidean distance computation (ground truth positions), not learned perception. Integrating learned obstacle detection into the world model is a key direction.
+\textbf{Obstacle detection.} Current obstacle detection uses runtime Euclidean distance computation (ground truth positions), not learned perception. Our investigation (Section~\ref{sec:results}, Table~\ref{tab:pure_aif}) shows that the RSSM latent space does not encode obstacle presence as a separable feature. A contrastive preference model achieves 37 nats separation at the posterior level, but the prior (imagination) remains obstacle-blind. Closing this gap---through clean avoidance demonstrations, auxiliary prediction losses, or object-centric architectures---is the critical open challenge.
 
 \textbf{Speed adaptation.} The fixed throttle range [0.35, 0.55] prevents braking or speed adjustment for curves. Learning a speed preference model could improve curve performance.
 
@@ -432,7 +487,9 @@ Our key insight is that precision-weighting, a core mechanism in active inferenc
 
 The post-evasion centering mechanism demonstrates that complex multi-maneuver behaviors can arise from simple precision dynamics rather than explicit behavior switching. This aligns with the active inference perspective that adaptive behavior emerges from the interplay between generative models and precision-weighted prediction errors.
 
-Future work will extend this framework to urban scenarios with learned obstacle detection, speed adaptation, and multi-agent interactions, toward a fully autonomous active inference driving system.
+Our investigation into pure vision-based obstacle avoidance reveals a fundamental challenge: the RSSM's latent imagination does not encode obstacle dynamics, preventing EFE-based planning from exploiting even well-separated preference distributions. A contrastive preference model achieves 37 nats separation between obstacle-free and obstacle-present posteriors, but the prior remains obstacle-blind. Bridging this posterior-prior gap---through high-quality avoidance demonstrations, auxiliary prediction losses, or object-centric world models---is the key to fully autonomous AIF obstacle avoidance.
+
+Future work will pursue clean obstacle avoidance demonstrations to enable the world model to imagine obstacle dynamics, extend the framework to urban scenarios, and investigate object-centric architectures for scene-level active inference.
 
 %----------------------------------------------------------------------
 
