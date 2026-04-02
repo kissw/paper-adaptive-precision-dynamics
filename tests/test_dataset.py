@@ -17,7 +17,7 @@ def small_h5(tmp_path):
 def test_dataset_sequence_extraction(small_h5):
     seq_len = 20
     ds = SequenceDataset(small_h5, seq_len=seq_len)
-    images, states, actions = ds[0]
+    images, states, actions, *_ = ds[0]
     assert images.shape == (seq_len, 3, 64, 64)
     assert states.shape == (seq_len, 4)
     assert actions.shape == (seq_len, 2)
@@ -50,7 +50,7 @@ def test_dataloader_batching(small_h5):
         small_h5, batch_size=batch_size, seq_len=seq_len, num_workers=0, shuffle=False
     )
     batch = next(iter(dl))
-    images, states, actions = batch
+    images, states, actions, *_ = batch
     assert images.shape == (batch_size, seq_len, 3, 64, 64)
     assert states.shape == (batch_size, seq_len, 4)
     assert actions.shape == (batch_size, seq_len, 2)

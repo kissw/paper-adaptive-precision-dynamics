@@ -44,6 +44,15 @@ class WorldModel(nn.Module):
             hidden_dim=cfg.ensemble.hidden_dim,
             num_heads=cfg.ensemble.num_heads,
         )
+        # Auxiliary obstacle prediction head (training only).
+        # Forces the latent space to encode obstacle presence so
+        # that imagination can distinguish obstacle-present from
+        # obstacle-free trajectories. Not used at eval time.
+        self.obstacle_head = nn.Sequential(
+            nn.Linear(feat_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1),
+        )
 
 
 class DeepAIFAgent:
@@ -180,27 +189,45 @@ class DeepAIFAgent:
     ) -> Tensor:
         return self.step_with_info(obs_img, obs_state).action
 
-    def update(self, images: Tensor, states: Tensor, actions: Tensor) -> dict[str, float]:
+    def update(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+        obstacle_labels: Tensor | None = None,
+    ) -> dict[str, float]:
         # Per-timestep backward with NaN guard, AMP, and CUDA error recovery
+        # obstacle_labels: [B, T] binary (1=obstacle visible, 0=clear)
         B, T = images.shape[0], images.shape[1]
         wm = self.world_model
         cfg = self._cfg.training
+        beta_obstacle_aux = getattr(cfg, "beta_obstacle_aux", 0.0)
 
         self._optimizer.zero_grad()
         total_loss_value = 0.0
-        accum = {"img_loss": 0.0, "state_loss": 0.0, "kl_dyn": 0.0, "kl_rep": 0.0}
+        accum = {
+            "img_loss": 0.0, "state_loss": 0.0,
+            "kl_dyn": 0.0, "kl_rep": 0.0, "obs_aux_loss": 0.0,
+        }
 
         prev_state = wm.rssm.initial(B, self._device)
-        prev_action = torch.zeros(B, self._cfg.cem.action_dim, device=self._device)
+        prev_action = torch.zeros(
+            B, self._cfg.cem.action_dim, device=self._device,
+        )
 
         for t in range(T):
             img_t = images[:, t].to(self._device)
             st_t = states[:, t].to(self._device)
-            act_t = actions[:, t].to(self._device) if t > 0 else prev_action
+            act_t = (
+                actions[:, t].to(self._device) if t > 0
+                else prev_action
+            )
 
             with torch.amp.autocast("cuda", enabled=self._use_amp):
                 embed = wm.encoder(img_t, st_t)
-                post, prior = wm.rssm.obs_step(prev_state, prev_action, embed)
+                post, prior = wm.rssm.obs_step(
+                    prev_state, prev_action, embed,
+                )
 
                 feat = wm.rssm.get_feat(post)
                 recon_img = wm.obs_decoder(feat)
@@ -220,10 +247,28 @@ class DeepAIFAgent:
                     kl_rep_scale=cfg.kl_rep_scale,
                 )
 
+                # Auxiliary obstacle prediction loss
+                obs_aux_loss_val = 0.0
+                if (obstacle_labels is not None
+                        and beta_obstacle_aux > 0):
+                    obs_logit = wm.obstacle_head(feat).squeeze(-1)
+                    obs_label = obstacle_labels[:, t].to(
+                        self._device,
+                    ).float()
+                    obs_aux = nn.functional.binary_cross_entropy_with_logits(
+                        obs_logit, obs_label,
+                    )
+                    loss = loss + beta_obstacle_aux * obs_aux
+                    obs_aux_loss_val = obs_aux.item()
+
             # NaN guard: skip this timestep if loss is bad
             if torch.isnan(loss) or torch.isinf(loss):
-                prev_state = RSSMState(*[x.detach() for x in post])
-                prev_action = act_t.detach() if t > 0 else prev_action
+                prev_state = RSSMState(
+                    *[x.detach() for x in post],
+                )
+                prev_action = (
+                    act_t.detach() if t > 0 else prev_action
+                )
                 continue
 
             scaled_loss = loss / T
@@ -233,11 +278,16 @@ class DeepAIFAgent:
                 scaled_loss.backward()
             total_loss_value += loss.item() / T
 
-            for k in accum:
+            for k in ["img_loss", "state_loss", "kl_dyn", "kl_rep"]:
                 accum[k] += info[k].item()
+            accum["obs_aux_loss"] += obs_aux_loss_val
 
-            prev_state = RSSMState(*[x.detach() for x in post])
-            prev_action = act_t.detach() if t > 0 else prev_action
+            prev_state = RSSMState(
+                *[x.detach() for x in post],
+            )
+            prev_action = (
+                act_t.detach() if t > 0 else prev_action
+            )
 
         if self._scaler is not None:
             self._scaler.unscale_(self._optimizer)

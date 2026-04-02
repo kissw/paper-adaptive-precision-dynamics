@@ -126,12 +126,14 @@ class SyntheticDrivingData:
             all_episode_ids.append(episode_ids)
             all_success_flags.append(success)
 
+        all_frames = np.concatenate(all_images, axis=0)
         return {
-            "images": np.concatenate(all_images, axis=0),
+            "images": all_frames,
             "states": np.concatenate(all_states, axis=0),
             "actions": np.concatenate(all_actions, axis=0),
             "episode_ids": np.concatenate(all_episode_ids, axis=0),
             "success_flags": np.concatenate(all_success_flags, axis=0),
+            "task_labels": np.zeros(len(all_frames), dtype=np.int8),
         }
 
     def to_hdf5(self, data: dict, path: str) -> None:

@@ -11,10 +11,18 @@ class SequenceDataset(Dataset):
         with h5py.File(h5_path, "r") as f:
             self.total_samples = len(f["episode_ids"])
             self.episode_ids = f["episode_ids"][:]
-            # Preload all data into memory for fast access
             self._images = torch.from_numpy(f["images"][:])
             self._states = torch.from_numpy(f["states"][:])
             self._actions = torch.from_numpy(f["actions"][:])
+            # Obstacle labels: task_label=1 for obstacle-present data
+            if "task_labels" in f:
+                self._obstacle_labels = torch.from_numpy(
+                    f["task_labels"][:].astype(np.float32),
+                )
+            else:
+                self._obstacle_labels = torch.zeros(
+                    self.total_samples, dtype=torch.float32,
+                )
 
         self.valid_starts = []
         for i in range(self.total_samples - seq_len + 1):
@@ -27,7 +35,12 @@ class SequenceDataset(Dataset):
     def __getitem__(self, idx):
         start = self.valid_starts[idx]
         end = start + self.seq_len
-        return self._images[start:end], self._states[start:end], self._actions[start:end]
+        return (
+            self._images[start:end],
+            self._states[start:end],
+            self._actions[start:end],
+            self._obstacle_labels[start:end],
+        )
 
 
 class PreferenceSequenceDataset(Dataset):

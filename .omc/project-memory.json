@@ -135,14 +135,14 @@
     },
     {
       "path": "src/active_inference/agent.py",
-      "accessCount": 15,
-      "lastAccessed": 1774961962872,
+      "accessCount": 19,
+      "lastAccessed": 1775142769053,
       "type": "file"
     },
     {
       "path": "paper/main.tex",
-      "accessCount": 12,
-      "lastAccessed": 1775005422517,
+      "accessCount": 13,
+      "lastAccessed": 1775142560865,
       "type": "file"
     },
     {
@@ -165,8 +165,14 @@
     },
     {
       "path": "configs/experiment/task_b_pure_aif.yaml",
+      "accessCount": 5,
+      "lastAccessed": 1775142810258,
+      "type": "file"
+    },
+    {
+      "path": "scripts/train.py",
       "accessCount": 4,
-      "lastAccessed": 1774840430041,
+      "lastAccessed": 1775142804285,
       "type": "file"
     },
     {
@@ -197,6 +203,12 @@
       "path": "configs/experiment/task_b_v5.yaml",
       "accessCount": 3,
       "lastAccessed": 1774793695729,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/data/dataset.py",
+      "accessCount": 3,
+      "lastAccessed": 1775142791715,
       "type": "file"
     },
     {
@@ -272,12 +284,6 @@
       "type": "file"
     },
     {
-      "path": "scripts/train.py",
-      "accessCount": 2,
-      "lastAccessed": 1774791769967,
-      "type": "file"
-    },
-    {
       "path": "scripts/collect_obstacle_data_v2.py",
       "accessCount": 2,
       "lastAccessed": 1775005486810,
@@ -287,6 +293,18 @@
       "path": "scripts/collect_obstacle_data_v3.py",
       "accessCount": 2,
       "lastAccessed": 1775006643932,
+      "type": "file"
+    },
+    {
+      "path": "docs/findings/2026-03-31-pure-aif-obstacle-avoidance-investigation.md",
+      "accessCount": 2,
+      "lastAccessed": 1775142554443,
+      "type": "file"
+    },
+    {
+      "path": "src/active_inference/data/synthetic.py",
+      "accessCount": 2,
+      "lastAccessed": 1775142867006,
       "type": "file"
     },
     {
@@ -344,12 +362,6 @@
       "type": "file"
     },
     {
-      "path": "src/active_inference/data/dataset.py",
-      "accessCount": 1,
-      "lastAccessed": 1774791406914,
-      "type": "file"
-    },
-    {
       "path": "CLAUDE.md",
       "accessCount": 1,
       "lastAccessed": 1774791738055,
@@ -392,16 +404,28 @@
       "type": "file"
     },
     {
-      "path": "docs/findings/2026-03-31-pure-aif-obstacle-avoidance-investigation.md",
-      "accessCount": 1,
-      "lastAccessed": 1775005302435,
-      "type": "file"
-    },
-    {
       "path": "scripts/collect_obstacle_data_v4.py",
       "accessCount": 1,
       "lastAccessed": 1775007667144,
       "type": "file"
+    },
+    {
+      "path": "paper/eiml2026/main.tex",
+      "accessCount": 1,
+      "lastAccessed": 1775142671451,
+      "type": "file"
+    },
+    {
+      "path": "paper/eiml2026/references.bib",
+      "accessCount": 1,
+      "lastAccessed": 1775142694547,
+      "type": "file"
+    },
+    {
+      "path": "tests",
+      "accessCount": 1,
+      "lastAccessed": 1775142920962,
+      "type": "directory"
     }
   ],
   "userDirectives": []

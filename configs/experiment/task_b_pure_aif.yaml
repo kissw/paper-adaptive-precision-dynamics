@@ -17,6 +17,7 @@ device: cuda
 
 training:
   batch_size: 64
+  beta_obstacle_aux: 1.0  # auxiliary obstacle prediction loss weight
 
 encoder:
   image_channels: 3

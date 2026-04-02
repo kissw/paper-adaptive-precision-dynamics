@@ -75,11 +75,17 @@ def main():
     for epoch in range(start_epoch, cfg.training.epochs):
         epoch_losses = []
 
-        for batch_idx, (images, states, actions) in enumerate(
+        for batch_idx, batch in enumerate(
             tqdm(dataloader, desc=f"Epoch {epoch + 1}/{cfg.training.epochs}", leave=False)
         ):
+            # Dataset returns 3 or 4 tensors depending on obstacle labels
+            if len(batch) == 4:
+                images, states, actions, obs_labels = batch
+            else:
+                images, states, actions = batch
+                obs_labels = None
             try:
-                info = agent.update(images, states, actions)
+                info = agent.update(images, states, actions, obs_labels)
             except RuntimeError as e:
                 if "CUDA" in str(e):
                     print(f"\nCUDA error at epoch {epoch + 1}, batch {batch_idx}: {e}")

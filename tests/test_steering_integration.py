@@ -41,7 +41,8 @@ def trained_agent(tmp_path_factory):
     losses = []
     for epoch in range(3):
         epoch_losses = []
-        for images, states, actions in dataloader:
+        for batch in dataloader:
+            images, states, actions = batch[0], batch[1], batch[2]
             info = agent.update(images, states, actions)
             if not np.isnan(info["total_loss"]):
                 epoch_losses.append(info["total_loss"])
