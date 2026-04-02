@@ -1,16 +1,13 @@
-"""Collect clean obstacle-avoidance demonstrations (v3).
+"""Collect clean obstacle-avoidance data via waypoint-based lane change (v4).
 
-Fixes from v2:
-1. Obstacle index advances correctly after each obstacle is passed
-2. Earlier detection (50m) gives more time for lane change
-3. Stronger steering (0.6) for reliable lane-width displacement
-4. Longer steer phase (30 frames) at 20 FPS = 1.5 seconds
-5. No return-to-lane phase — stay in adjacent lane (simpler, cleaner)
-6. Skip episodes with collisions (only keep clean demonstrations)
+Instead of fighting the autopilot with scripted steering, this version
+redirects the BasicAgent to a waypoint in the adjacent lane when near
+an obstacle. The autopilot's own path planner handles the lane change
+smoothly and collision-free.
 
-The world model needs to see: obstacle appears in image → steer →
-obstacle exits image → drive in adjacent lane. This is the critical
-visual sequence for learning obstacle dynamics in latent imagination.
+Key insight: the autopilot needs a new DESTINATION in the adjacent lane,
+not a steering override. The autopilot's internal planner will generate
+a smooth lane-change trajectory to reach the new waypoint.
 """
 
 import argparse
@@ -24,14 +21,14 @@ import h5py
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Collect clean obstacle-avoidance data (v3)",
+        description="Collect clean obstacle-avoidance data (v4)",
     )
     parser.add_argument("--town", default="Town06_Opt")
     parser.add_argument("--num_samples", type=int, default=30000)
-    parser.add_argument("--output", default="data/expert_obstacle_v3.h5")
+    parser.add_argument("--output", default="data/expert_obstacle_v4.h5")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=2000)
-    parser.add_argument("--episode_len", type=int, default=2500)
+    parser.add_argument("--episode_len", type=int, default=3000)
     parser.add_argument("--num_obstacles", type=int, default=2)
     parser.add_argument("--image_size", type=int, default=64)
     parser.add_argument("--seed", type=int, default=42)
@@ -75,7 +72,6 @@ def main():
     client.set_timeout(30.0)
     carla_map = client.get_world().get_map()
 
-    # Buffers for clean episodes only
     all_images = []
     all_states = []
     all_actions = []
@@ -93,21 +89,15 @@ def main():
     clean_episodes = 0
     total_attempts = 0
 
-    # Wider obstacle spacing for easier avoidance
     FRACTION_SETS = [
         [0.30, 0.70],
         [0.25, 0.65],
         [0.35, 0.75],
         [0.20, 0.60],
-        [0.30, 0.70],
+        [0.40, 0.80],
     ]
 
-    # Lane-change parameters — tuned for reliable avoidance
-    # At 25 km/h (~7 m/s), 80m = ~11 sec to complete lane change
-    DETECT_DIST = 80.0    # detect obstacle 80m ahead
-    STEER_MAG = 0.8       # strong steering for full lane change
-    STEER_FRAMES = 40     # 2.0 sec at 20 FPS
-    COAST_FRAMES = 60     # 3.0 sec coasting in new lane
+    DETECT_DIST = 60.0  # redirect agent at 60m
 
     try:
         while collected < args.num_samples:
@@ -135,10 +125,10 @@ def main():
 
             obs_positions = [(ix, iy) for _, ix, iy in obstacle_actors]
 
+            # Create agent heading to the final goal
             agent = BasicAgent(env._vehicle, target_speed=args.target_speed)
             agent.set_destination(goal_loc)
 
-            # Episode buffers (only committed if collision-free)
             ep_images = []
             ep_states = []
             ep_actions = []
@@ -147,104 +137,82 @@ def main():
             ep_lane_list = []
             ep_collisions = 0
 
-            # Lane-change state machine
-            lc_active = False
-            lc_phase = 0       # 0=steer, 1=coast
-            lc_counter = 0
-            lc_direction = 0.0
             current_obs_idx = 0
             passed_obstacles = set()
+            redirect_done = set()  # track which obstacles triggered redirect
 
             total_attempts += 1
 
             for t in range(args.episode_len):
-                control = agent.run_step()
-                expert_action = carla_to_action(
-                    control.steer, control.throttle, control.brake,
-                )
                 loc = env._vehicle.get_location()
                 yaw = math.radians(
                     env._vehicle.get_transform().rotation.yaw,
                 )
 
-                # Track which obstacles have been passed (behind ego)
+                # Track passed obstacles
                 for oi, (ox, oy) in enumerate(obs_positions):
                     if oi in passed_obstacles:
                         continue
                     dx, dy = ox - loc.x, oy - loc.y
                     fwd_proj = dx * math.cos(yaw) + dy * math.sin(yaw)
-                    if fwd_proj < -15.0:  # obstacle is 15m behind
+                    if fwd_proj < -15.0:
                         passed_obstacles.add(oi)
                         if oi == current_obs_idx:
                             current_obs_idx += 1
+                            # After passing obstacle, redirect back
+                            # to final goal so agent returns to route
+                            agent.set_destination(goal_loc)
 
-                # Detect next obstacle ahead
-                if (not lc_active
-                        and current_obs_idx < n_spawned
-                        and current_obs_idx not in passed_obstacles):
+                # Redirect agent to adjacent lane waypoint when near
+                if (current_obs_idx < n_spawned
+                        and current_obs_idx not in passed_obstacles
+                        and current_obs_idx not in redirect_done):
                     ox, oy = obs_positions[current_obs_idx]
                     dx, dy = ox - loc.x, oy - loc.y
                     dist = math.sqrt(dx ** 2 + dy ** 2)
                     fwd_proj = dx * math.cos(yaw) + dy * math.sin(yaw)
 
                     if fwd_proj > 0 and dist < DETECT_DIST:
-                        lc_active = True
-                        lc_phase = 0
-                        lc_counter = 0
-                        # Pick direction from lane geometry
-                        wp = carla_map.get_waypoint(loc)
-                        if wp:
-                            left = wp.get_left_lane()
-                            right = wp.get_right_lane()
-                            has_left = (
-                                left is not None
-                                and str(left.lane_type) == "Driving"
-                            )
-                            has_right = (
-                                right is not None
-                                and str(right.lane_type) == "Driving"
-                            )
-                            if has_left and not has_right:
-                                lc_direction = -1.0
-                            elif has_right and not has_left:
-                                lc_direction = 1.0
-                            else:
-                                # Alternate direction
-                                lc_direction = (
-                                    -1.0 if current_obs_idx % 2 == 0
-                                    else 1.0
-                                )
-                        else:
-                            lc_direction = -1.0
-                        print(
-                            f"    t={t} LC start: obs[{current_obs_idx}]"
-                            f" dist={dist:.0f}m dir={lc_direction:+.0f}"
+                        # Find waypoint past obstacle in adjacent lane
+                        obs_wp = carla_map.get_waypoint(
+                            carla.Location(x=ox, y=oy),
                         )
+                        if obs_wp:
+                            # Get adjacent lane
+                            left = obs_wp.get_left_lane()
+                            right = obs_wp.get_right_lane()
+                            adj = None
+                            if (left and str(left.lane_type) == "Driving"):
+                                adj = left
+                            elif (right
+                                  and str(right.lane_type) == "Driving"):
+                                adj = right
 
-                # Apply lane-change override
-                if lc_active:
-                    action = expert_action.copy()
-                    if lc_phase == 0:  # steer into adjacent lane
-                        action[0] = lc_direction * STEER_MAG
-                        action[1] = max(action[1], 0.1)  # maintain speed
-                        lc_counter += 1
-                        if lc_counter >= STEER_FRAMES:
-                            lc_phase = 1
-                            lc_counter = 0
-                    elif lc_phase == 1:  # coast in adjacent lane
-                        action[0] = 0.0  # straight
-                        lc_counter += 1
-                        if lc_counter >= COAST_FRAMES:
-                            lc_active = False
-                            lc_phase = 0
-                            lc_counter = 0
-                    noisy_action = np.clip(action, -1.0, 1.0)
-                else:
-                    # Normal driving with very light noise
-                    noise = rng.normal(0, 0.02, size=2)
-                    noisy_action = np.clip(
-                        expert_action + noise, -1.0, 1.0,
-                    )
+                            if adj:
+                                # Get a waypoint 30m past obstacle
+                                # in the adjacent lane
+                                ahead = adj.next(30.0)
+                                if ahead:
+                                    target = ahead[0].transform.location
+                                    agent.set_destination(target)
+                                    redirect_done.add(current_obs_idx)
+                                    print(
+                                        f"    t={t} REDIRECT obs["
+                                        f"{current_obs_idx}] "
+                                        f"dist={dist:.0f}m → "
+                                        f"adj lane"
+                                    )
+
+                control = agent.run_step()
+                expert_action = carla_to_action(
+                    control.steer, control.throttle, control.brake,
+                )
+
+                # Very light noise
+                noise = rng.normal(0, 0.02, size=2)
+                noisy_action = np.clip(
+                    expert_action + noise, -1.0, 1.0,
+                )
 
                 obs, info = env.step(noisy_action)
                 img, state = obs
@@ -277,7 +245,7 @@ def main():
                 if goal_dist < 15.0 or agent.done():
                     break
                 if ep_collisions > 0:
-                    break  # abort immediately on collision
+                    break
 
             ep_frames = len(ep_images)
             lane_changes = sum(
@@ -289,8 +257,7 @@ def main():
             )
             is_clean = ep_collisions == 0 and lane_changes > 0
 
-            if is_clean and ep_frames > 50:
-                # Commit this episode
+            if is_clean and ep_frames > 100:
                 for i in range(ep_frames):
                     all_images.append(ep_images[i])
                     all_states.append(ep_states[i])
@@ -378,7 +345,7 @@ def main():
         f.attrs["total_episodes"] = episode_idx
         f.attrs["clean_episodes"] = clean_episodes
         f.attrs["total_attempts"] = total_attempts
-        f.attrs["collection_type"] = "clean_obstacle_avoidance_v3"
+        f.attrs["collection_type"] = "waypoint_obstacle_avoidance_v4"
 
     print(
         f"\nSaved {n} clean frames ({clean_episodes} episodes, "

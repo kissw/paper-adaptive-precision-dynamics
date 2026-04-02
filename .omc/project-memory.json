@@ -140,15 +140,15 @@
       "type": "file"
     },
     {
-      "path": "src/active_inference/planning/efe.py",
-      "accessCount": 10,
-      "lastAccessed": 1774961863820,
+      "path": "paper/main.tex",
+      "accessCount": 12,
+      "lastAccessed": 1775005422517,
       "type": "file"
     },
     {
-      "path": "paper/main.tex",
-      "accessCount": 6,
-      "lastAccessed": 1774527342346,
+      "path": "src/active_inference/planning/efe.py",
+      "accessCount": 10,
+      "lastAccessed": 1774961863820,
       "type": "file"
     },
     {
@@ -278,6 +278,18 @@
       "type": "file"
     },
     {
+      "path": "scripts/collect_obstacle_data_v2.py",
+      "accessCount": 2,
+      "lastAccessed": 1775005486810,
+      "type": "file"
+    },
+    {
+      "path": "scripts/collect_obstacle_data_v3.py",
+      "accessCount": 2,
+      "lastAccessed": 1775006643932,
+      "type": "file"
+    },
+    {
       "path": "docs/experiment-results.md",
       "accessCount": 1,
       "lastAccessed": 1774525066550,
@@ -374,15 +386,21 @@
       "type": "file"
     },
     {
-      "path": "scripts/collect_obstacle_data_v2.py",
-      "accessCount": 1,
-      "lastAccessed": 1774840493749,
-      "type": "file"
-    },
-    {
       "path": "scripts/fit_contrastive_preference.py",
       "accessCount": 1,
       "lastAccessed": 1774961945977,
+      "type": "file"
+    },
+    {
+      "path": "docs/findings/2026-03-31-pure-aif-obstacle-avoidance-investigation.md",
+      "accessCount": 1,
+      "lastAccessed": 1775005302435,
+      "type": "file"
+    },
+    {
+      "path": "scripts/collect_obstacle_data_v4.py",
+      "accessCount": 1,
+      "lastAccessed": 1775007667144,
       "type": "file"
     }
   ],
