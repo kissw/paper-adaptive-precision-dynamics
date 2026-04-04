@@ -86,6 +86,52 @@ obstacle avoidance, and post-evasion lane return. Our contributions:
 \end{enumerate}
 
 %----------------------------------------------------------------------
+\section{Related Work}
+
+\textbf{Deep active inference.}
+\citet{catal2020learning} and \citet{fountas2020deep} apply deep
+active inference with VAE world models to visual navigation and
+Atari games. \citet{millidge2020deep} connects active inference
+with variational policy gradients, and
+\citet{lanillos2021active} surveys active inference in robotics.
+However, these works operate in discrete or simple continuous
+domains and do not address how a single EFE objective can produce
+\emph{multiple} distinct behaviors through precision modulation.
+We extend deep active inference to continuous-action driving with
+adaptive precision dynamics that enable behavioral flexibility
+from a shared world model.
+
+\textbf{World models for control.}
+DreamerV3~\citep{hafner2023mastering} uses RSSM imagination for
+RL-based policy learning, achieving strong results across diverse
+domains. MILE~\citep{hu2022model} learns driving world models for
+imitation. These systems use the world model for policy
+optimization but do not examine whether the RSSM's imagined
+rollouts faithfully represent safety-critical objects like
+obstacles. We show that RSSM imagination exhibits an epistemic
+blind spot for obstacle-level reasoning, a limitation that may
+affect these systems as well.
+
+\textbf{Epistemic uncertainty in planning.}
+\citet{chua2018deep} use ensemble disagreement for model-based RL,
+and \citet{sekar2020planning} plan to explore via world model
+uncertainty. These approaches assume that epistemic signals
+available during observation transfer to planning. We demonstrate
+that this assumption fails for RSSM-based active inference:
+posterior epistemic competence does not guarantee prior
+(imagination) competence.
+
+\textbf{Precision in active inference.}
+Precision-weighting is central to biological active
+inference~\citep{parr2022active}, modulating attention and sensory
+gain. While theoretical accounts describe how precision enables
+flexible behavior, computational implementations typically use
+fixed weights. We provide an empirical demonstration of
+\emph{adaptive} precision dynamics in a deep AIF agent, where
+runtime modulation of EFE component weights produces qualitatively
+different driving behaviors.
+
+%----------------------------------------------------------------------
 \section{Background}
 
 \subsection{Active Inference and EFE}
@@ -138,11 +184,9 @@ Our EFE scoring evaluates imagined trajectories from iCEM (500
 samples, 50 elites, 5 iterations, horizon 12--15) with four
 components:
 \begin{equation}
-\boxed{
     G(\tau) = \sum_{t=1}^{H} \gamma^t \Big[
     \beta_i G_i(t) - \beta_e G_e(t) + \beta_s G_s(t) + \beta_o G_o(t)
     \Big]
-}
 \label{eq:efe}
 \end{equation}
 
@@ -394,42 +438,6 @@ or object-centric world models
 SAVi~\citep{kipf2022conditional}) that decompose scenes into
 slots, may enable the transition model to predict how obstacles
 move through the visual field as a function of steering actions.
-
-%----------------------------------------------------------------------
-\section{Related Work}
-
-\textbf{Deep active inference.}
-\citet{catal2020learning} apply deep active inference with VAE
-world models to visual navigation.
-\citet{fountas2020deep} use Monte-Carlo active inference for
-Atari games. \citet{millidge2020deep} connects active inference
-with variational policy gradients.
-\citet{lanillos2021active} surveys active inference in robotics.
-These works demonstrate AIF in discrete or simple continuous
-domains; we extend to continuous-action driving with RSSM world
-models, multi-component EFE, and adaptive precision dynamics.
-
-\textbf{World models for control.}
-DreamerV3~\citep{hafner2023mastering} uses RSSM imagination for
-RL-based policy learning. MILE~\citep{hu2022model} learns driving
-world models for imitation. Our approach uses the world model for
-EFE-based planning rather than policy optimization, and identifies
-a failure mode in RSSM imagination for obstacle-level reasoning.
-
-\textbf{Epistemic uncertainty in planning.}
-\citet{chua2018deep} use ensemble disagreement for model-based RL.
-\citet{sekar2020planning} plan to explore via world models.
-Our work reveals that epistemic signals available during
-filtering (posterior) may not transfer to planning (prior)---a
-distinction not previously identified.
-
-\textbf{Precision in active inference.}
-Precision-weighting is central to biological active
-inference~\citep{parr2022active}, where it modulates attention
-and sensory gain. Our adaptive $\beta$ modulation is a
-computational analog: prediction errors dynamically adjust the
-influence of EFE components, enabling behavioral flexibility
-from a single objective.
 
 %----------------------------------------------------------------------
 \section{Conclusion}
