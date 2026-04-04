@@ -38,22 +38,24 @@ coordinates. Using an RSSM world model trained on CARLA highway
 scenarios, we systematically test whether learned preferences can
 drive obstacle avoidance through imagined trajectory planning. We
 discover a fundamental \textbf{epistemic blind spot}: while the
-RSSM posterior (filtering) correctly encodes obstacle presence---a
-contrastive preference model achieves 37 nats separation between
-obstacle-free and obstacle-present latent states---the RSSM prior
-(imagination) remains obstacle-blind. During CEM planning, all
-imagined trajectories produce similar latent sequences regardless
-of steering direction, because the world model cannot predict how
-obstacles enter or exit the visual field as a function of actions.
-This posterior-prior gap persists across three input modalities
-(64$\times$64 RGB, 128$\times$128 RGB, RGBD), multiple preference
-formulations (single GMM, contrastive log-ratio), and two training
-data strategies (collision-inclusive and collision-free obstacle
-demonstrations). Our results demonstrate that epistemic competence
-at the observation level (posterior) does not guarantee epistemic
-competence at the planning level (prior), identifying a critical
-limitation of current RSSM-based active inference for safety-relevant
-decision-making.
+RSSM posterior (filtering) correctly encodes obstacle presence,
+the RSSM prior (imagination) remains obstacle-blind. A contrastive
+preference model achieves 37 nats separation between obstacle-free
+and obstacle-present posterior latents; an auxiliary obstacle
+prediction head achieves \emph{perfect} binary separation (0.000 vs
+1.000) and amplifies contrastive separation to 276 nats. Yet
+obstacle avoidance remains at 0\% in all cases---the RSSM transition
+model cannot predict how obstacles evolve as a function of steering
+actions. This posterior-prior gap persists across three input
+modalities (64$\times$64 RGB, 128$\times$128 RGB, RGBD), multiple
+preference formulations, auxiliary training signals, and two data
+strategies. We isolate the blind spot to the RSSM \emph{transition
+model} specifically: the representation contains obstacle
+information, but the dynamics model fails to propagate it through
+action-conditioned rollouts. Our results demonstrate that posterior
+epistemic competence does not guarantee planning-level epistemic
+competence---a critical limitation for safety-relevant active
+inference.
 \end{abstract}
 
 %----------------------------------------------------------------------
@@ -100,6 +102,13 @@ evaluated on obstacle avoidance in CARLA 0.9.16
     insufficient}: collision-free obstacle demonstrations improve
     world model driving quality (MLD 0.15m) but do not close the
     imagination gap.
+
+    \item We \textbf{isolate the blind spot to the transition model}
+    via an auxiliary obstacle prediction head that achieves perfect
+    posterior separation (0.000 vs 1.000) and 276 nats contrastive
+    gap---yet avoidance remains at 0\%, proving the representation
+    is adequate but the dynamics model cannot propagate obstacle
+    information through action-conditioned rollouts.
 \end{enumerate}
 
 %----------------------------------------------------------------------
@@ -245,6 +254,65 @@ is preserved (MLD 0.15m) but avoidance remains 0\%. The RSSM
 learns to \emph{reconstruct} obstacle images (1.62$\times$ higher
 reconstruction error) but not to \emph{imagine} obstacle dynamics.
 
+\subsection{Auxiliary Head Isolates the Transition Model}
+
+To determine whether the blind spot lies in the \emph{representation}
+(latent space lacks obstacle information) or the \emph{transition
+model} (dynamics cannot propagate it), we add an auxiliary obstacle
+prediction head---a small MLP (320$\rightarrow$128$\rightarrow$1)
+trained with binary cross-entropy alongside the VFE loss. The head
+receives RSSM features and predicts obstacle presence
+($\beta_{\text{aux}}{=}1.0$). Crucially, this head is used
+\textbf{only during training} to shape the latent space; at
+evaluation time, only the shaped representation and standard EFE
+scoring are used.
+
+\begin{table}[h]
+\centering
+\caption{Auxiliary head forces obstacle information into the latent
+space, achieving perfect posterior separation. Avoidance remains 0\%.}
+\label{tab:aux}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Model} & \textbf{Obs.\ head} & \textbf{Contr.\ gap} & \textbf{Avoid} \\
+ & (clean / obs) & (eff.\ nats) & \\
+\midrule
+v6 (no aux) & N/A & 1.1 & 0\% \\
+v10 (no aux, clean data) & N/A & 1.1 & 0\% \\
+v11 (aux head) & 0.000 / 1.000 & 133.1 & 0\% \\
+\bottomrule
+\end{tabular}
+\vspace{1mm}
+\small{Obs.\ head: sigmoid output (0=clean, 1=obstacle).
+Contr.\ gap: contrastive log-ratio at $\alpha{=}0.2$.}
+\end{table}
+
+The auxiliary head achieves \textbf{perfect binary separation}
+(Table~\ref{tab:aux}): 0.000 for obstacle-free frames, 1.000 for
+obstacle-present frames. The contrastive preference gap increases
+from 1.1 to \textbf{133.1 effective nats} (276 raw)---a
+$120\times$ improvement. This proves the latent space \emph{can}
+encode obstacle presence when forced by supervision.
+
+Yet obstacle avoidance remains at \textbf{0\%}. The agent with
+the auxiliary-head-shaped latent space still collides with every
+obstacle. This result \emph{definitively isolates the blind spot}:
+
+\begin{itemize}
+    \item \textbf{Representation}: adequate. The latent space
+    encodes obstacle presence with perfect fidelity.
+    \item \textbf{Transition model}: deficient. The GRU-based
+    dynamics $f(h_t, z_t, a_t) \rightarrow h_{t+1}$ does not
+    learn that ``steer left when obstacle ahead'' produces
+    different future latent states than ``continue straight.''
+\end{itemize}
+
+During imagination, the RSSM transition model rolls out future
+states using only the prior. Even though the current posterior
+state encodes ``obstacle present,'' the transition model maps all
+action sequences to similar future states---it has not learned
+obstacle-conditioned dynamics.
+
 %----------------------------------------------------------------------
 \section{Discussion}
 
@@ -256,21 +324,26 @@ competence in world-model-based active inference:
 \textbf{Posterior competence} (filtering): The RSSM posterior
 correctly encodes obstacle presence when conditioned on
 observations. The contrastive preference achieves 37+ nats
-separation. Reconstruction error is 1.62$\times$ higher for
-obstacle images. The information \emph{is there}.
+separation without auxiliary supervision, and \emph{276 nats} with
+an auxiliary prediction head. The representation is not the
+bottleneck.
 
 \textbf{Prior incompetence} (imagination): The RSSM prior cannot
 predict how obstacle-related visual features evolve as a function
-of steering actions. During open-loop rollouts, the stochastic
-latent reverts to a dynamics-dominated representation where
-obstacle presence is lost.
+of steering actions. Even when the auxiliary head forces perfect
+obstacle encoding into the latent space (0.000 vs 1.000), the
+transition model does not propagate this information through
+action-conditioned rollouts.
 
-This posterior-prior gap is an \textbf{epistemic blind spot}: the
-agent can recognize danger when it sees it but cannot predict
-danger from its plans. In active inference terms, the generative
-model's \emph{likelihood} (observation model) encodes obstacles,
-but the \emph{transition} model (dynamics) does not propagate this
-information through action-conditioned rollouts.
+This posterior-prior gap is an \textbf{epistemic blind spot}
+localized in the \textbf{transition model}: the agent can
+recognize danger when it sees it but cannot predict danger from
+its plans. In active inference terms, the generative model's
+\emph{likelihood} (observation model) encodes obstacles, but the
+\emph{transition} model $f(h_t, z_t, a_t) \rightarrow h_{t+1}$
+does not learn obstacle-conditioned dynamics. The auxiliary head
+experiment serves as a controlled ablation that separates
+representation adequacy from transition adequacy.
 
 \subsection{Implications for AIF Safety}
 
@@ -305,11 +378,15 @@ from 64 to 256 may provide enough capacity to encode both driving
 dynamics and scene content. This is the most self-supervised
 approach but may require proportionally more training data.
 
-\textbf{Auxiliary prediction signal.} A supervised obstacle
-detection head during training forces the latent space to encode
-obstacle presence. At evaluation time, only the shaped latent
-representation is used---no privileged information. This is
-analogous to learning with privileged information (LUPI).
+\textbf{Auxiliary prediction signal.} We tested a supervised
+obstacle detection head during training that forces the latent
+space to encode obstacle presence (Section~4.5). While this
+achieves perfect posterior separation, the transition model
+remains obstacle-blind. A stronger version---training the
+auxiliary head on \emph{imagined} rollouts rather than posterior
+states---may force the transition model to propagate obstacle
+information, but this requires differentiating through the
+imagination loop.
 
 \textbf{Object-centric architectures.} Models like SLATE
 \citep{singh2022illiterate} or SAVi \citep{kipf2022conditional}
@@ -344,25 +421,32 @@ may not transfer to planning (prior).
 \section{Conclusion}
 
 We identified a fundamental epistemic blind spot in RSSM-based
-active inference: the world model's posterior correctly encodes
-obstacle presence (37 nats contrastive separation), but the prior
-(imagination) cannot predict obstacle dynamics from actions. This
-posterior-prior gap persists across input modalities (RGB,
-high-resolution RGB, RGBD), preference formulations (single GMM,
-contrastive), and training data quality (collision-inclusive,
-collision-free demonstrations). The result is an agent that drives
-excellently (100\% success rate, 0.17m lateral deviation at
-128$\times$128) but is completely blind to obstacles in its
-planning horizon.
+active inference and isolated it to the \emph{transition model}.
+The world model's posterior correctly encodes obstacle
+presence---a contrastive preference achieves 37 nats separation,
+and an auxiliary prediction head achieves perfect binary
+classification (276 nats)---but the prior (imagination) cannot
+predict obstacle dynamics from actions. This posterior-prior gap
+persists across input modalities (RGB, high-resolution RGB, RGBD),
+preference formulations (single GMM, contrastive), auxiliary
+supervision, and training data quality. The result is an agent
+that drives excellently (100\% SR, 0.17m MLD at 128$\times$128)
+but is completely blind to obstacles in its planning horizon.
 
-This finding highlights that epistemic competence at the
-observation level does not guarantee epistemic competence at the
-planning level---a critical consideration for deploying active
-inference agents in safety-relevant domains. Closing this
-posterior-prior gap, through larger latent representations,
-auxiliary training signals, or object-centric architectures,
-is essential for realizing the full promise of active inference
-for autonomous decision-making.
+The auxiliary head experiment provides the critical ablation:
+forcing obstacle information into the latent space with perfect
+fidelity does not help, because the GRU-based transition model
+$f(h_t, z_t, a_t) \rightarrow h_{t+1}$ does not learn
+obstacle-conditioned dynamics. This isolates the problem from
+representation capacity to transition model expressiveness.
+
+Our findings highlight that posterior epistemic competence does
+not guarantee planning-level epistemic competence---a distinction
+that is critical for deploying active inference agents in
+safety-relevant domains. Future work should focus on transition
+model architectures that can learn object-conditioned dynamics,
+such as attention-based transitions or object-centric world
+models, to close this posterior-prior gap.
 
 %----------------------------------------------------------------------
 \bibliographystyle{plainnat}
