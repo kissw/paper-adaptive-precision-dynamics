@@ -1,9 +1,22 @@
-\begin{thebibliography}{7}
+\begin{thebibliography}{14}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
   \providecommand{\doi}[1]{doi: #1}\else
   \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Catal et~al.(2020)Catal, Wauthier, De~Boom, Verbelen, and
+  Dhoedt]{catal2020learning}
+Ozan Catal, Samuel Wauthier, Cedric De~Boom, Tim Verbelen, and Bart Dhoedt.
+\newblock Learning perception and planning with deep active inference.
+\newblock \emph{arXiv preprint arXiv:2001.11841}, 2020.
+
+\bibitem[Chua et~al.(2018)Chua, Calandra, McAllister, and Levine]{chua2018deep}
+Kurtland Chua, Roberto Calandra, Rowan McAllister, and Sergey Levine.
+\newblock Deep reinforcement learning in a handful of trials using
+  probabilistic dynamics models.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~31, 2018.
 
 \bibitem[Dosovitskiy et~al.(2017)Dosovitskiy, Ros, Codevilla, Lopez, and
   Koltun]{dosovitskiy2017carla}
@@ -11,6 +24,13 @@ Alexey Dosovitskiy, German Ros, Felipe Codevilla, Antonio Lopez, and Vladlen
   Koltun.
 \newblock {CARLA}: An open urban driving simulator.
 \newblock In \emph{Conference on Robot Learning}, pages 1--16, 2017.
+
+\bibitem[Fountas et~al.(2020)Fountas, Sajid, Mediano, and
+  Friston]{fountas2020deep}
+Zafeirios Fountas, Noor Sajid, Pedro~AM Mediano, and Karl Friston.
+\newblock Deep active inference agents using {Monte-Carlo} methods.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~33, pages 11662--11675, 2020.
 
 \bibitem[Friston(2010)]{friston2010free}
 Karl Friston.
@@ -24,6 +44,12 @@ Danijar Hafner, Jurgis Pasukonis, Jimmy Ba, and Timothy Lillicrap.
 \newblock Mastering diverse domains through world models.
 \newblock \emph{arXiv preprint arXiv:2301.04104}, 2023.
 
+\bibitem[Hu et~al.(2022)]{hu2022model}
+Anthony Hu et~al.
+\newblock Model-based imitation learning for urban driving.
+\newblock In \emph{Advances in Neural Information Processing Systems},
+  volume~35, 2022.
+
 \bibitem[Kipf et~al.(2022)Kipf, Elsayed, Mahendran, Stone, Sabour, Heigold,
   Jonschkowski, Dosovitskiy, and Greff]{kipf2022conditional}
 Thomas Kipf, Gamaleldin~F Elsayed, Aravindh Mahendran, Austin Stone, Sara
@@ -31,6 +57,17 @@ Thomas Kipf, Gamaleldin~F Elsayed, Aravindh Mahendran, Austin Stone, Sara
   Greff.
 \newblock Conditional object-centric learning from video.
 \newblock In \emph{International Conference on Learning Representations}, 2022.
+
+\bibitem[Lanillos et~al.(2021)]{lanillos2021active}
+Pablo Lanillos et~al.
+\newblock Active inference in robotics and artificial agents: Survey and
+  challenges.
+\newblock \emph{arXiv preprint arXiv:2112.01871}, 2021.
+
+\bibitem[Millidge(2020)]{millidge2020deep}
+Beren Millidge.
+\newblock Deep active inference as variational policy gradients.
+\newblock \emph{Journal of Mathematical Psychology}, 96:\penalty0 102348, 2020.
 
 \bibitem[Parr et~al.(2022)Parr, Pezzulo, and Friston]{parr2022active}
 Thomas Parr, Giovanni Pezzulo, and Karl~J Friston.
@@ -44,6 +81,14 @@ Cristina Pinneri, Shambhuraj Sawant, Sebastian Blaes, Jan Achterhold, Joerg
   Stueckler, Michal Rolinek, and Georg Martius.
 \newblock Sample-efficient cross-entropy method for real-time planning.
 \newblock In \emph{Conference on Robot Learning}, pages 1049--1065, 2021.
+
+\bibitem[Sekar et~al.(2020)Sekar, Rybkin, Daniilidis, Abbeel, Hafner, and
+  Pathak]{sekar2020planning}
+Ramanan Sekar, Oleh Rybkin, Kostas Daniilidis, Pieter Abbeel, Danijar Hafner,
+  and Deepak Pathak.
+\newblock Planning to explore via self-supervised world models.
+\newblock In \emph{International Conference on Machine Learning}, pages
+  8583--8592, 2020.
 
 \bibitem[Singh et~al.(2022)Singh, Deng, and Ahn]{singh2022illiterate}
 Gautam Singh, Fei Deng, and Sungjin Ahn.

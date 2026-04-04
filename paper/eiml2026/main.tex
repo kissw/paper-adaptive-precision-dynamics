@@ -21,32 +21,20 @@ University of Michigan--Dearborn \\
 \maketitle
 
 \begin{abstract}
-We present a deep active inference agent that performs both lane
-keeping and obstacle avoidance through a single Expected Free Energy
-(EFE) objective with adaptive precision-weighting. Using a Recurrent
-State-Space Model (RSSM) world model trained on expert demonstrations
-in CARLA, the agent dynamically modulates the relative influence of
-four EFE components---latent-space instrumental value, ensemble-based
-epistemic value, decoded state-space preferences, and obstacle
-penalties---based on sensory prediction errors and environmental
-context. This precision dynamics mechanism enables distinct driving
-behaviors to emerge from the same generative model: lane centering
-on curves (81.2\% route completion, 0.63m lateral deviation),
-obstacle avoidance with 100\% success (28/28 obstacles), and
-post-evasion lane return via temporary precision shifts. All
-behaviors share a single world model checkpoint; only precision
-weights differ between tasks. We further investigate whether
-obstacle detection can be learned from the latent space alone,
-removing privileged obstacle coordinates. Through systematic
-experiments across three input modalities, contrastive preference
-models (37 nats posterior separation), and auxiliary prediction
-heads (276 nats, perfect binary separation), we discover a
-\textbf{posterior-prior epistemic gap}: the RSSM posterior correctly
-encodes obstacle presence, but the transition model cannot propagate
-this information through action-conditioned imagination. This gap,
-localized to the transition model via controlled ablation,
-identifies a fundamental limitation of current RSSM-based planning
-for safety-critical active inference.
+We present a deep active inference agent where adaptive
+precision-weighting enables lane keeping, obstacle avoidance, and
+post-evasion centering to emerge from a single Expected Free Energy
+(EFE) objective and shared RSSM world model. By dynamically
+modulating EFE component weights based on sensory prediction errors,
+the agent achieves 81.2\% route completion on curves and 100\%
+obstacle avoidance (28/28) in CARLA---without separate reward
+functions or control modules. We further investigate whether obstacle
+detection can be learned from the latent space alone, discovering a
+\textbf{posterior-prior epistemic gap}: an auxiliary prediction head
+achieves perfect obstacle encoding in the posterior (276 nats
+separation), yet avoidance remains at 0\% because the RSSM
+transition model cannot propagate obstacle information through
+action-conditioned imagination.
 \end{abstract}
 
 %----------------------------------------------------------------------
@@ -406,6 +394,42 @@ or object-centric world models
 SAVi~\citep{kipf2022conditional}) that decompose scenes into
 slots, may enable the transition model to predict how obstacles
 move through the visual field as a function of steering actions.
+
+%----------------------------------------------------------------------
+\section{Related Work}
+
+\textbf{Deep active inference.}
+\citet{catal2020learning} apply deep active inference with VAE
+world models to visual navigation.
+\citet{fountas2020deep} use Monte-Carlo active inference for
+Atari games. \citet{millidge2020deep} connects active inference
+with variational policy gradients.
+\citet{lanillos2021active} surveys active inference in robotics.
+These works demonstrate AIF in discrete or simple continuous
+domains; we extend to continuous-action driving with RSSM world
+models, multi-component EFE, and adaptive precision dynamics.
+
+\textbf{World models for control.}
+DreamerV3~\citep{hafner2023mastering} uses RSSM imagination for
+RL-based policy learning. MILE~\citep{hu2022model} learns driving
+world models for imitation. Our approach uses the world model for
+EFE-based planning rather than policy optimization, and identifies
+a failure mode in RSSM imagination for obstacle-level reasoning.
+
+\textbf{Epistemic uncertainty in planning.}
+\citet{chua2018deep} use ensemble disagreement for model-based RL.
+\citet{sekar2020planning} plan to explore via world models.
+Our work reveals that epistemic signals available during
+filtering (posterior) may not transfer to planning (prior)---a
+distinction not previously identified.
+
+\textbf{Precision in active inference.}
+Precision-weighting is central to biological active
+inference~\citep{parr2022active}, where it modulates attention
+and sensory gain. Our adaptive $\beta$ modulation is a
+computational analog: prediction errors dynamically adjust the
+influence of EFE components, enabling behavioral flexibility
+from a single objective.
 
 %----------------------------------------------------------------------
 \section{Conclusion}
