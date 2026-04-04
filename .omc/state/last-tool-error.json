@@ -1,7 +1,7 @@
 {
-  "tool_name": "WebFetch",
-  "tool_input_preview": "{\"url\":\"https://sites.google.com/view/eimlicml2026/call-for-papers\",\"prompt\":\"Extract the full call for papers: topics of interest, submission format, page limits, important dates/deadlines, evaluatio...",
-  "error": "Request failed with status code 404",
-  "timestamp": "2026-04-02T14:48:28.014Z",
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"sleep 30 && python3 -c \\\"import carla; c=carla.Client('127.0.0.1',2000); c.set_timeout(30); w=c.get_world(); print(f'CARLA world: {w.get_map().name}'); print('Ready for evaluation')\\\" 2>&1...",
+  "error": "Exit code 1\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\nModuleNotFoundError: No module named 'carla'",
+  "timestamp": "2026-04-04T04:25:48.692Z",
   "retry_count": 1
 }

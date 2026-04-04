@@ -176,6 +176,12 @@
       "type": "file"
     },
     {
+      "path": "src/active_inference/config.py",
+      "accessCount": 4,
+      "lastAccessed": 1775143060910,
+      "type": "file"
+    },
+    {
       "path": "src/active_inference/evaluation/routes.py",
       "accessCount": 3,
       "lastAccessed": 1774535786669,
@@ -377,12 +383,6 @@
       "path": "IMPLEMENTATION_PLAN.md",
       "accessCount": 1,
       "lastAccessed": 1774791738930,
-      "type": "file"
-    },
-    {
-      "path": "src/active_inference/config.py",
-      "accessCount": 1,
-      "lastAccessed": 1774791756823,
       "type": "file"
     },
     {

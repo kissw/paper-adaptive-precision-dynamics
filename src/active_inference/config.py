@@ -36,6 +36,7 @@ class TrainingConfig:
     kl_dyn_scale: float = 1.0
     kl_rep_scale: float = 0.1
     lr_warmup_steps: int = 1000
+    beta_obstacle_aux: float = 0.0  # auxiliary obstacle prediction loss weight
 
 
 @dataclass
