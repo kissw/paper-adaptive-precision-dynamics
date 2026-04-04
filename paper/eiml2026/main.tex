@@ -100,12 +100,15 @@ active inference with VAE world models to visual navigation and
 Atari games. \citet{millidge2020deep} connects active inference
 with variational policy gradients, and
 \citet{lanillos2021active} surveys active inference in robotics.
-However, these works operate in discrete or simple continuous
-domains and do not address how a single EFE objective can produce
-\emph{multiple} distinct behaviors through precision modulation.
-We extend deep active inference to continuous-action driving with
-adaptive precision dynamics that enable behavioral flexibility
-from a shared world model.
+\citet{delavari2025perceptual} demonstrate active inference for
+lateral vehicle control via perceptual motor learning, achieving
+lane keeping with minimal training data. However, these works
+focus on single behaviors and do not address how a single EFE
+objective can produce \emph{multiple} distinct behaviors through
+precision modulation. We extend beyond single-task active
+inference to adaptive precision dynamics that enable behavioral
+flexibility---lane keeping, obstacle avoidance, and post-evasion
+centering---from a shared world model.
 
 \textbf{World models for control.}
 DreamerV3~\citep{hafner2023mastering} uses RSSM imagination for

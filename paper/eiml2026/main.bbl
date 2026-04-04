@@ -1,4 +1,4 @@
-\begin{thebibliography}{14}
+\begin{thebibliography}{15}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
@@ -17,6 +17,13 @@ Kurtland Chua, Roberto Calandra, Rowan McAllister, and Sergey Levine.
   probabilistic dynamics models.
 \newblock In \emph{Advances in Neural Information Processing Systems},
   volume~31, 2018.
+
+\bibitem[Delavari et~al.(2025)Delavari, Moore, Hong, and
+  Kwon]{delavari2025perceptual}
+Elahe Delavari, John Moore, Junho Hong, and Jaerock Kwon.
+\newblock Perceptual motor learning with active inference framework for robust
+  lateral control.
+\newblock \emph{arXiv preprint arXiv:2503.01676}, 2025.
 
 \bibitem[Dosovitskiy et~al.(2017)Dosovitskiy, Ros, Codevilla, Lopez, and
   Koltun]{dosovitskiy2017carla}
