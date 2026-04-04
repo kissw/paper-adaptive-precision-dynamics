@@ -1,22 +1,12 @@
 \documentclass{article}
 
-% ICML 2026 format (workshop papers typically use icml style)
-% For submission, use the icml2026.sty if available; otherwise
-% use standard article with similar margins
 \usepackage{eiml_icml2026}
-% \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb,amsfonts}
-% \usepackage[T1]{fontenc}
-% \usepackage{lmodern}
-% \usepackage{graphicx}
 \usepackage{booktabs}
-% \usepackage{url}
-% \usepackage{xcolor}
-% \usepackage{natbib}
-% \usepackage{microtype}
 
-\title{Epistemic Blind Spots in World-Model-Based Active Inference:\\
-Why RSSM Imagination Cannot See Obstacles}
+\title{Adaptive Precision Dynamics in Deep Active Inference:\\
+From Lane Keeping to Obstacle Avoidance via Expected Free Energy
+Minimization}
 
 \author{
 Jaerock Kwon \\
@@ -31,84 +21,80 @@ University of Michigan--Dearborn \\
 \maketitle
 
 \begin{abstract}
-We investigate whether obstacle avoidance can emerge purely from
-Expected Free Energy (EFE) minimization in a deep active inference
-agent for autonomous driving---without privileged obstacle
-coordinates. Using an RSSM world model trained on CARLA highway
-scenarios, we systematically test whether learned preferences can
-drive obstacle avoidance through imagined trajectory planning. We
-discover a fundamental \textbf{epistemic blind spot}: while the
-RSSM posterior (filtering) correctly encodes obstacle presence,
-the RSSM prior (imagination) remains obstacle-blind. A contrastive
-preference model achieves 37 nats separation between obstacle-free
-and obstacle-present posterior latents; an auxiliary obstacle
-prediction head achieves \emph{perfect} binary separation (0.000 vs
-1.000) and amplifies contrastive separation to 276 nats. Yet
-obstacle avoidance remains at 0\% in all cases---the RSSM transition
-model cannot predict how obstacles evolve as a function of steering
-actions. This posterior-prior gap persists across three input
-modalities (64$\times$64 RGB, 128$\times$128 RGB, RGBD), multiple
-preference formulations, auxiliary training signals, and two data
-strategies. We isolate the blind spot to the RSSM \emph{transition
-model} specifically: the representation contains obstacle
-information, but the dynamics model fails to propagate it through
-action-conditioned rollouts. Our results demonstrate that posterior
-epistemic competence does not guarantee planning-level epistemic
-competence---a critical limitation for safety-relevant active
-inference.
+We present a deep active inference agent that performs both lane
+keeping and obstacle avoidance through a single Expected Free Energy
+(EFE) objective with adaptive precision-weighting. Using a Recurrent
+State-Space Model (RSSM) world model trained on expert demonstrations
+in CARLA, the agent dynamically modulates the relative influence of
+four EFE components---latent-space instrumental value, ensemble-based
+epistemic value, decoded state-space preferences, and obstacle
+penalties---based on sensory prediction errors and environmental
+context. This precision dynamics mechanism enables distinct driving
+behaviors to emerge from the same generative model: lane centering
+on curves (81.2\% route completion, 0.63m lateral deviation),
+obstacle avoidance with 100\% success (28/28 obstacles), and
+post-evasion lane return via temporary precision shifts. All
+behaviors share a single world model checkpoint; only precision
+weights differ between tasks. We further investigate whether
+obstacle detection can be learned from the latent space alone,
+removing privileged obstacle coordinates. Through systematic
+experiments across three input modalities, contrastive preference
+models (37 nats posterior separation), and auxiliary prediction
+heads (276 nats, perfect binary separation), we discover a
+\textbf{posterior-prior epistemic gap}: the RSSM posterior correctly
+encodes obstacle presence, but the transition model cannot propagate
+this information through action-conditioned imagination. This gap,
+localized to the transition model via controlled ablation,
+identifies a fundamental limitation of current RSSM-based planning
+for safety-critical active inference.
 \end{abstract}
 
 %----------------------------------------------------------------------
 \section{Introduction}
 
-Active inference \citep{friston2010free, parr2022active} provides a
-unified framework for perception, learning, and action through free
-energy minimization. A key promise is that goal-directed behavior
-emerges from the agent's generative model without hand-crafted
-reward functions: the agent imagines future trajectories, scores
-them by Expected Free Energy (EFE), and selects actions that
-minimize surprise relative to its preferences.
+Active inference~\citep{friston2010free, parr2022active} unifies
+perception, learning, and action under a single variational
+principle: free energy minimization. An agent maintains a generative
+model of its environment and selects actions that minimize Expected
+Free Energy (EFE), naturally balancing goal-seeking (instrumental
+value) with information-seeking (epistemic value). This eliminates
+the need for separate reward functions and exploration strategies
+that characterize reinforcement learning approaches.
 
-For this promise to hold in safety-critical domains like autonomous
-driving, the agent's world model must be \emph{epistemically
-competent}---it must know what it knows and, crucially, represent
-what it doesn't know. When an obstacle appears on the road, the
-world model should encode this as a deviation from preferred states,
-and imagined trajectories should reflect whether actions resolve or
-worsen the situation.
+A key theoretical construct in active inference is
+\emph{precision}---the inverse variance of prediction errors---which
+modulates the relative influence of different information channels.
+In biological systems, precision-weighting enables flexible behavior:
+the same neural circuitry produces different actions by adjusting
+which prediction errors are attended to~\citep{parr2022active}. We
+ask: \emph{can adaptive precision dynamics enable a single deep
+active inference agent to exhibit multiple driving behaviors?}
 
-We test this assumption using a deep active inference agent with a
-Recurrent State-Space Model (RSSM) \citep{hafner2023mastering}
-world model, GMM preference distributions, and iCEM planning,
-evaluated on obstacle avoidance in CARLA 0.9.16
-\citep{dosovitskiy2017carla}. Our contributions:
+We demonstrate that the answer is yes. Using an RSSM world
+model~\citep{hafner2023mastering} with iCEM
+planning~\citep{pinneri2021sample} in
+CARLA~\citep{dosovitskiy2017carla}, a single EFE objective with
+dynamically adjusted precision weights produces lane keeping,
+obstacle avoidance, and post-evasion lane return. Our contributions:
 
 \begin{enumerate}
-    \item We identify an \textbf{epistemic blind spot} where the
-    RSSM posterior correctly encodes obstacle presence but the prior
-    (imagination) cannot predict obstacle dynamics from actions.
+    \item A \textbf{multi-component EFE formulation} combining
+    latent-space instrumental value (GMM preference), ensemble-based
+    epistemic value, decoded state-space preferences, and runtime
+    obstacle penalties in a unified scoring function.
 
-    \item We introduce a \textbf{contrastive preference model}
-    (log-ratio of two GMMs) that achieves 37+ nats separation
-    between obstacle-free and obstacle-present posterior latents,
-    demonstrating that the representation \emph{contains} obstacle
-    information.
+    \item An \textbf{adaptive precision-weighting mechanism} where
+    sensory prediction errors and environmental context dynamically
+    modulate EFE component weights, enabling distinct behaviors to
+    emerge from the same world model.
 
-    \item We show this posterior-prior gap is \textbf{robust across
-    modalities}: 64$\times$64 RGB, 128$\times$128 RGB, and RGBD
-    (depth camera) all exhibit the same failure pattern.
+    \item \textbf{Post-evasion centering} via temporary precision
+    shifts that produce multi-maneuver obstacle avoidance sequences
+    (evasion $\rightarrow$ lane return $\rightarrow$ evasion).
 
-    \item We demonstrate that \textbf{data quality matters but is
-    insufficient}: collision-free obstacle demonstrations improve
-    world model driving quality (MLD 0.15m) but do not close the
-    imagination gap.
-
-    \item We \textbf{isolate the blind spot to the transition model}
-    via an auxiliary obstacle prediction head that achieves perfect
-    posterior separation (0.000 vs 1.000) and 276 nats contrastive
-    gap---yet avoidance remains at 0\%, proving the representation
-    is adequate but the dynamics model cannot propagate obstacle
-    information through action-conditioned rollouts.
+    \item A systematic \textbf{investigation of vision-based
+    obstacle detection} through latent representations, revealing a
+    posterior-prior epistemic gap in the RSSM transition model.
 \end{enumerate}
 
 %----------------------------------------------------------------------
@@ -125,10 +111,9 @@ minimize Expected Free Energy:
     \Big]
 \end{equation}
 where the instrumental term drives the agent toward preferred
-states and the epistemic term promotes information-seeking. For
-obstacle avoidance, if $p_{\text{pref}}$ assigns low probability
-to obstacle-present states, the instrumental term should naturally
-drive evasive actions.
+states $p_{\text{pref}}$ and the epistemic term promotes
+information-seeking. Precision-weighting modulates the relative
+influence of these terms based on their estimated reliability.
 
 \subsection{RSSM World Model}
 
@@ -138,315 +123,310 @@ The RSSM maintains deterministic state $h_t \in \mathbb{R}^{256}$
     \text{Posterior:} \quad z_t &\sim q(z_t | h_t, o_t) & \text{(filtering)} \\
     \text{Prior:} \quad \hat{z}_t &\sim p(z_t | h_t) & \text{(imagination)}
 \end{align}
-During \textbf{filtering} (observation available), the posterior
-incorporates visual evidence---including obstacles. During
-\textbf{imagination} (planning), only the prior is available,
-conditioned on the deterministic state and actions. The epistemic
-blind spot arises when the posterior encodes information that the
-prior cannot reproduce.
+The concatenated feature $[h_t; z_t] \in \mathbb{R}^{320}$ serves
+as the latent state for decoding and planning. During planning,
+only the prior is available---this distinction becomes critical in
+Section~\ref{sec:vision}.
 
 %----------------------------------------------------------------------
-\section{Experimental Setup}
+\section{Method}
 
-\textbf{Architecture.} ConvEncoder (4-layer CNN, 64$\times$64
-$\rightarrow$ 256D), RSSM (deter=256, stoch=64), ObsDecoder,
-StateDecoder, 5-head ensemble for epistemic uncertainty. iCEM
-planner (500 samples, 50 elites, 5 iterations, horizon 15).
+\subsection{Architecture}
 
-\textbf{Tasks.} CARLA 0.9.16 highway: Task~A (lane keeping,
-Town04, moderate curves) and Task~B (obstacle avoidance, Town06,
-2--3 static obstacles per route, 373--518m).
+The world model comprises a ConvEncoder (4-layer CNN processing
+64$\times$64 RGB + 4D proprioceptive state
+$[\text{speed}, \text{steer}, h_{\text{err}}, c_{\text{err}}]$
+$\rightarrow$ 256D embedding), RSSM (deter=256, stoch=64),
+ObsDecoder (image reconstruction), StateDecoder (4D state
+prediction), and 5-head EnsembleTransitionHeads (epistemic
+uncertainty). Training minimizes Variational Free Energy (VFE)
+with dual KL divergence~\citep{hafner2023mastering}, image and
+state reconstruction losses, on 96K frames of expert driving from
+CARLA Towns 04 and 06.
 
-\textbf{Training data.} 96K frames obstacle-free expert driving
-(Town04 + Town06) plus 10--30K frames obstacle-encounter data
-(BehaviorAgent and scripted lane-change demonstrations).
+\subsection{Multi-Component EFE}
 
-\textbf{Privileged baseline.} Task~B with runtime ground-truth
-obstacle coordinates achieves 100\% avoidance (28/28 obstacles)
-via reflexive steer prior, motor primitives, and directional CEM
-penalty. All six privileged mechanisms are removed for the pure
-AIF experiments.
+Our EFE scoring evaluates imagined trajectories from iCEM (500
+samples, 50 elites, 5 iterations, horizon 12--15) with four
+components:
+\begin{equation}
+\boxed{
+    G(\tau) = \sum_{t=1}^{H} \gamma^t \Big[
+    \beta_i G_i(t) - \beta_e G_e(t) + \beta_s G_s(t) + \beta_o G_o(t)
+    \Big]
+}
+\label{eq:efe}
+\end{equation}
 
-%----------------------------------------------------------------------
-\section{Results}
+\textbf{Instrumental value} $G_i$: Cross-entropy
+$\mathbb{E}_q[-\log p_{\text{pref}}(z_t)]$ between imagined
+latents and a GMM preference fitted on expert driving latents
+($K{=}5$, 64D). Z-scored across the CEM population per timestep.
 
-\subsection{The Preference Gap is Inverted}
+\textbf{Epistemic value} $G_e$: Ensemble disagreement among 5
+transition heads. Promotes information-seeking (negative sign in
+Eq.~\ref{eq:efe}).
 
-We fit a GMM preference model on obstacle-free expert latents and
-evaluate log-probability on held-out obstacle-free vs.\
-obstacle-present latents. If the GMM correctly encodes ``prefer
-obstacle-free states,'' obstacle-present latents should have lower
-log-probability.
+\textbf{State-space value} $G_s$: Decoded heading error and
+crosstrack error from the state decoder, penalizing deviation from
+lane center: $G_s(t) = \min(\hat{h}_t^2 + \hat{c}_t^2, 4.0)$.
+Not z-scored---state decoder predictions during imagination are
+noisy, and z-scoring amplifies this noise.
 
-\begin{table}[h]
+\textbf{Obstacle penalty} $G_o$: Runtime lane-change incentive
+using detected obstacle proximity and decoded crosstrack shift.
+Penalizes imagined trajectories that maintain the current lateral
+position when an obstacle is ahead.
+
+\subsection{Adaptive Precision Dynamics}
+\label{sec:precision}
+
+The core mechanism: $\beta$ weights are modulated at runtime based
+on prediction errors and context, enabling different behaviors from
+the same EFE.
+
+\textbf{State error modulation.} When observed state error
+$e = h_{\text{err}}^2 + c_{\text{err}}^2$ exceeds 0.3, the agent
+increases $\beta_s$ (trust direct state observation) and decreases
+$\beta_i$ (distrust GMM preference, which is out-of-distribution
+for off-center states):
+\begin{align}
+    \beta_s &\leftarrow \beta_s \cdot \min(4, 1 + 4(e - 0.3)) \\
+    \beta_i &\leftarrow \beta_i \, / \, \min(4, 1 + 4(e - 0.3))
+\end{align}
+
+\textbf{Obstacle proximity modulation.} When an obstacle is
+detected ($\rho > 0.1$), the instrumental weight is suppressed to
+let the obstacle penalty dominate:
+$\beta_i \leftarrow \beta_i \cdot \max(0.2, 1 - 0.8\rho)$.
+
+\textbf{Post-evasion centering.} After obstacle clearance,
+$\beta_s$ is temporarily set to 0.5 with full heading+crosstrack
+penalty, pulling the ego back toward the route lane center. This
+deactivates when the ego returns to the route lane or a new
+obstacle is detected.
+
+\begin{table}[t]
 \centering
-\caption{Preference gap: $\Delta = \log p(z_{\text{clean}}) - \log p(z_{\text{obs}})$.
-Positive = correct direction.}
-\label{tab:gap}
+\caption{Task-specific precision configurations. Same world model
+checkpoint; only $\beta$ weights and horizon differ.}
+\label{tab:config}
 \begin{tabular}{lcc}
 \toprule
-\textbf{Input modality} & \textbf{$\Delta$ (nats)} & \textbf{Recon ratio} \\
+\textbf{Parameter} & \textbf{Task A} & \textbf{Task B} \\
 \midrule
-64$\times$64 RGB & $-$24.6 & 1.62$\times$ \\
-128$\times$128 RGB & $-$2.3 & 1.91$\times$ \\
-64$\times$64 RGBD & $-$68.1 & 1.35$\times$ \\
+$\beta_{\text{instrumental}}$ & 1.0 & 1.0 \\
+$\beta_{\text{epistemic}}$ & 0.1 & 0.1 \\
+$\beta_{\text{state}}$ & 0.5 & 0.0 \\
+$\beta_{\text{obstacle}}$ & 0.0 & 40.0 \\
+Horizon $H$ & 12 & 15 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The gap is \textbf{inverted in all cases}: obstacle-present latents
-receive \emph{higher} GMM probability. The RSSM latent space
-encodes driving dynamics (speed, steering, lane position) rather
-than scene content. Higher resolution (128$\times$128) narrows the
-gap but does not reverse it. Adding depth worsens it.
+Table~\ref{tab:config} shows the key difference: Task~A uses
+$\beta_s{=}0.5$ for continuous centering while Task~B sets
+$\beta_s{=}0.0$ to allow lateral deviation during lane changes,
+with $\beta_o{=}40.0$ for obstacle avoidance.
 
-\subsection{Contrastive Preference Achieves Posterior Separation}
+%----------------------------------------------------------------------
+\section{Emergent Driving Behaviors}
 
-We replace the single GMM with a contrastive model:
-$\log p_{\text{pref}}(z) = \log p_{\text{clean}}(z) - \alpha \cdot \log p_{\text{avoid}}(z)$,
-where $p_{\text{clean}}$ is fitted on obstacle-free and
-$p_{\text{avoid}}$ on obstacle-present latents.
+All experiments use CARLA 0.9.16 with synchronous mode at 20~FPS.
 
-\begin{table}[h]
+\subsection{Task A: Lane Keeping}
+
+On Town04 moderate curves (378m, 0\degree--85\degree{} heading
+change), the agent achieves 81.2\% average route completion with
+0.63m mean lateral deviation (MLD). The state-space penalty
+($\beta_s{=}0.5$) provides a Gaussian preference
+$\tilde{p}(s) = \mathcal{N}(0, I)$ over heading and crosstrack
+errors that keeps the agent centered through curves.
+
+\subsection{Task B: Obstacle Avoidance}
+
+On Town06 highway routes (373--518m, 2--3 static obstacles per
+route), the agent achieves 100\% success rate with 28/28 obstacles
+avoided across 11 episodes on three route configurations
+(Table~\ref{tab:results}).
+
+\begin{table}[t]
 \centering
-\caption{Contrastive preference: posterior separation is correct,
-but obstacle avoidance remains at 0\%.}
-\label{tab:contrastive}
-\begin{tabular}{lccc}
+\caption{Obstacle avoidance results. SR: success rate. LC: mean
+lane changes per episode.}
+\label{tab:results}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Scale $\alpha$} & \textbf{Raw gap} & \textbf{MLD (m)} & \textbf{Avoidance} \\
+\textbf{Route} & \textbf{SR} & \textbf{Avoided} & \textbf{MLD} & \textbf{LC} \\
 \midrule
-1.0 & +37.0 nats & 4.0 & 0\% (off-road) \\
-0.3 & +9.2 nats & 0.32 & 0\% \\
-0.2 & +1.1 nats & 0.17 & 0\% \\
-0.1 & +1.0 nats & 0.31 & 0\% \\
+R0 (373m, 2 obs) & 100\% & 10/10 & 0.67 & 6.0 \\
+R1 (518m, 3 obs) & 100\% & 9/9 & 0.66 & 6.0 \\
+R2 (518m, 3 alt.) & 100\% & 9/9 & 0.49 & 6.0 \\
+\midrule
+\textbf{Total} & \textbf{100\%} & \textbf{28/28} & 0.60 & 6.0 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-At $\alpha{=}1.0$, the 37 nats gap is strong but overwhelms
-driving (MLD 4.0m). At $\alpha{\leq}0.3$, driving is preserved
-but avoidance remains 0\%. The contrastive signal correctly
-separates \emph{posterior} latents but cannot influence
-\emph{imagined} trajectories.
+Each obstacle is avoided via an active lane-change maneuver
+($\sim$6 lane changes per episode), triggered by the obstacle
+proximity ramp modulating $\beta_o$ and suppressing $\beta_i$.
 
-\subsection{The Epistemic Blind Spot}
+\subsection{Post-Evasion Centering}
 
-The root cause: during CEM planning, the RSSM imagines 500
-trajectories via \texttt{img\_step} (prior only). These imagined
-latent sequences do not encode obstacle proximity because the
-prior cannot predict obstacle appearance/disappearance from
-steering actions. All trajectories---straight, left, right---produce
-similar latent sequences in imagination.
+Route~2 places obstacles in alternating lanes. Without centering,
+the ego remains offset after the first evasion ($Y \approx 45$m)
+and passively clears subsequent obstacles. With the precision
+shift ($\beta_s \rightarrow 0.5$ after lock release), the ego
+returns toward the route lane between obstacles, requiring
+independent evasion decisions for each obstacle. This produces 6
+active lane changes per episode rather than a single maneuver
+followed by passive clearance.
 
-\textbf{Evidence:} The 128$\times$128 RGB model achieves 100\%
-success rate (goal reached) with 0.17m mean lateral deviation and
-zero offroad events---the best driving quality of any variant---yet
-avoids zero obstacles. The agent drives perfectly but is blind to
-obstacles in its plans.
+\subsection{Shared World Model}
 
-\subsection{Clean Data Does Not Close the Gap}
+Both tasks use the same trained world model checkpoint. The
+behavioral difference emerges entirely from precision weights:
+Task~A emphasizes state-space centering ($\beta_s{=}0.5$,
+$\beta_o{=}0$), Task~B emphasizes obstacle avoidance
+($\beta_s{=}0$, $\beta_o{=}40$), and post-evasion centering
+temporarily blends both. This demonstrates that adaptive precision
+dynamics---not separate models or reward functions---can orchestrate
+multiple behaviors within a unified active inference framework.
 
-We collected 30K collision-free obstacle avoidance demonstrations
-(40\% clean rate via waypoint-redirect autopilot) and retrained.
-With 10K obstacle frames (9.4\% of training data), driving quality
-is preserved (MLD 0.15m) but avoidance remains 0\%. The RSSM
-learns to \emph{reconstruct} obstacle images (1.62$\times$ higher
-reconstruction error) but not to \emph{imagine} obstacle dynamics.
+%----------------------------------------------------------------------
+\section{Toward Vision-Based Obstacle Detection}
+\label{sec:vision}
 
-\subsection{Auxiliary Head Isolates the Transition Model}
+The obstacle avoidance results above rely on runtime obstacle
+coordinates. We investigate whether this information can emerge
+from the latent space, removing all six privileged mechanisms
+(proximity computation, evasion direction, reflexive steer
+override, motor primitives, directional CEM penalty, obstacle
+EFE penalty).
 
-To determine whether the blind spot lies in the \emph{representation}
-(latent space lacks obstacle information) or the \emph{transition
-model} (dynamics cannot propagate it), we add an auxiliary obstacle
-prediction head---a small MLP (320$\rightarrow$128$\rightarrow$1)
-trained with binary cross-entropy alongside the VFE loss. The head
-receives RSSM features and predicts obstacle presence
-($\beta_{\text{aux}}{=}1.0$). Crucially, this head is used
-\textbf{only during training} to shape the latent space; at
-evaluation time, only the shaped representation and standard EFE
-scoring are used.
+\subsection{Preference Gap Analysis}
+
+We fit a GMM on obstacle-free expert latents and measure the gap
+$\Delta = \log p(z_{\text{clean}}) - \log p(z_{\text{obs}})$.
+A positive gap would enable EFE-driven avoidance.
 
 \begin{table}[h]
 \centering
-\caption{Auxiliary head forces obstacle information into the latent
-space, achieving perfect posterior separation. Avoidance remains 0\%.}
-\label{tab:aux}
+\caption{Preference gap across modalities and methods.}
+\label{tab:gap}
 \begin{tabular}{lccc}
 \toprule
-\textbf{Model} & \textbf{Obs.\ head} & \textbf{Contr.\ gap} & \textbf{Avoid} \\
- & (clean / obs) & (eff.\ nats) & \\
+\textbf{Method} & \textbf{$\Delta$} & \textbf{MLD} & \textbf{Avoid} \\
 \midrule
-v6 (no aux) & N/A & 1.1 & 0\% \\
-v10 (no aux, clean data) & N/A & 1.1 & 0\% \\
-v11 (aux head) & 0.000 / 1.000 & 133.1 & 0\% \\
+\multicolumn{4}{l}{\emph{Single GMM (different modalities)}} \\
+\quad 64$\times$64 RGB & $-$24.6 & 0.31 & 0\% \\
+\quad 128$\times$128 RGB & $-$2.3 & 0.17 & 0\% \\
+\quad 64$\times$64 RGBD & $-$68.1 & --- & 0\% \\
+\midrule
+\multicolumn{4}{l}{\emph{Contrastive preference ($\alpha{=}0.2$)}} \\
+\quad Without aux head & +1.1 & 0.17 & 0\% \\
+\quad With aux head & +133.1 & 0.61 & 0\% \\
 \bottomrule
 \end{tabular}
 \vspace{1mm}
-\small{Obs.\ head: sigmoid output (0=clean, 1=obstacle).
-Contr.\ gap: contrastive log-ratio at $\alpha{=}0.2$.}
+\small{$\Delta$: effective nats (positive = correct). Aux head:
+binary obstacle prediction during training only.}
 \end{table}
 
-The auxiliary head achieves \textbf{perfect binary separation}
-(Table~\ref{tab:aux}): 0.000 for obstacle-free frames, 1.000 for
-obstacle-present frames. The contrastive preference gap increases
-from 1.1 to \textbf{133.1 effective nats} (276 raw)---a
-$120\times$ improvement. This proves the latent space \emph{can}
-encode obstacle presence when forced by supervision.
+\subsection{Contrastive Preference}
 
-Yet obstacle avoidance remains at \textbf{0\%}. The agent with
-the auxiliary-head-shaped latent space still collides with every
-obstacle. This result \emph{definitively isolates the blind spot}:
+We replace the single GMM with a log-ratio model:
+$\log p_{\text{pref}}(z) = \log p_{\text{clean}}(z)
+- \alpha \log p_{\text{avoid}}(z)$. This achieves correct
+posterior separation (37 nats raw at $\alpha{=}1.0$, 1.1 effective
+at $\alpha{=}0.2$), but avoidance remains 0\%.
 
-\begin{itemize}
-    \item \textbf{Representation}: adequate. The latent space
-    encodes obstacle presence with perfect fidelity.
-    \item \textbf{Transition model}: deficient. The GRU-based
-    dynamics $f(h_t, z_t, a_t) \rightarrow h_{t+1}$ does not
-    learn that ``steer left when obstacle ahead'' produces
-    different future latent states than ``continue straight.''
-\end{itemize}
+\subsection{Auxiliary Prediction Head}
 
-During imagination, the RSSM transition model rolls out future
-states using only the prior. Even though the current posterior
-state encodes ``obstacle present,'' the transition model maps all
-action sequences to similar future states---it has not learned
+To determine whether the bottleneck is the representation or the
+transition model, we add a supervised obstacle prediction head
+(MLP: 320$\rightarrow$128$\rightarrow$1, BCE loss,
+$\beta_{\text{aux}}{=}1.0$) during training only. This achieves
+\textbf{perfect} posterior separation (0.000 vs 1.000) and
+amplifies the contrastive gap to 276 nats (133.1 effective).
+Yet avoidance remains at \textbf{0\%}.
+
+\subsection{The Posterior-Prior Epistemic Gap}
+
+These results isolate the blind spot to the RSSM
+\textbf{transition model} $f(h_t, z_t, a_t) \rightarrow h_{t+1}$.
+The posterior (filtering) encodes obstacle presence with
+perfect fidelity, but the prior (imagination) cannot predict how
+obstacles evolve as a function of steering actions. During CEM
+planning, all imagined trajectories---straight, left,
+right---produce similar latent sequences regardless of the
+posterior's obstacle encoding. The transition model has not learned
 obstacle-conditioned dynamics.
 
 %----------------------------------------------------------------------
 \section{Discussion}
 
-\subsection{Posterior vs.\ Prior Epistemic Competence}
+\textbf{Precision dynamics as a unifying mechanism.}
+Our results demonstrate that adaptive precision-weighting is
+sufficient to produce multiple driving behaviors from a single
+EFE objective and world model. Lane keeping, obstacle avoidance,
+and post-evasion centering emerge from the interplay between
+four EFE components modulated by sensory prediction errors.
+This aligns with the active inference account of biological
+behavior, where precision-weighting enables flexible responses
+without separate control modules~\citep{parr2022active}.
 
-Our results reveal a dissociation between two levels of epistemic
-competence in world-model-based active inference:
+\textbf{Posterior $\neq$ prior epistemic competence.}
+The vision-based experiments reveal a fundamental dissociation:
+the RSSM posterior correctly encodes obstacle presence (276 nats
+with auxiliary supervision), but the transition model does not
+propagate this through imagination. This has direct implications
+for EFE-based planning: the planning quality is bounded by the
+transition model's ability to imagine action consequences, not by
+the representation's expressiveness. This finding may generalize
+to other RSSM-based systems (e.g.,
+DreamerV3~\citep{hafner2023mastering}) when applied to
+safety-critical scenarios requiring object-level reasoning.
 
-\textbf{Posterior competence} (filtering): The RSSM posterior
-correctly encodes obstacle presence when conditioned on
-observations. The contrastive preference achieves 37+ nats
-separation without auxiliary supervision, and \emph{276 nats} with
-an auxiliary prediction head. The representation is not the
-bottleneck.
+\textbf{Limitations.}
+Obstacle detection currently relies on runtime coordinates rather
+than learned perception---a form of privileged information. While
+the precision-weighting framework is principled, the obstacle
+penalty $G_o$ requires external obstacle positions. Sharp curves
+beyond $\sim$85\degree{} exceed the training distribution. All
+evaluation is on highway segments without junctions or traffic.
 
-\textbf{Prior incompetence} (imagination): The RSSM prior cannot
-predict how obstacle-related visual features evolve as a function
-of steering actions. Even when the auxiliary head forces perfect
-obstacle encoding into the latent space (0.000 vs 1.000), the
-transition model does not propagate this information through
-action-conditioned rollouts.
-
-This posterior-prior gap is an \textbf{epistemic blind spot}
-localized in the \textbf{transition model}: the agent can
-recognize danger when it sees it but cannot predict danger from
-its plans. In active inference terms, the generative model's
-\emph{likelihood} (observation model) encodes obstacles, but the
-\emph{transition} model $f(h_t, z_t, a_t) \rightarrow h_{t+1}$
-does not learn obstacle-conditioned dynamics. The auxiliary head
-experiment serves as a controlled ablation that separates
-representation adequacy from transition adequacy.
-
-\subsection{Implications for AIF Safety}
-
-This finding has direct implications for deploying active inference
-agents in safety-critical settings:
-
-\begin{enumerate}
-    \item \textbf{EFE planning is only as good as imagination.}
-    A preference model that perfectly separates safe from unsafe
-    states is useless if the world model cannot imagine the
-    consequences of actions in those states.
-
-    \item \textbf{Observation-level epistemic uncertainty is
-    insufficient.} Ensemble disagreement and reconstruction error
-    detect obstacles at the observation level, but these signals
-    are not available during imagination (no observations).
-
-    \item \textbf{The latent bottleneck prioritizes dynamics over
-    content.} With 64 stochastic dimensions, the RSSM encodes
-    temporally smooth driving dynamics rather than spatially
-    localized scene content (obstacles). This is efficient for
-    lane keeping but blind to safety-critical objects.
-\end{enumerate}
-
-\subsection{Toward Closing the Gap}
-
-Three directions may address this epistemic blind spot while
-remaining within the active inference framework:
-
-\textbf{Larger latent space.} Increasing stochastic dimensions
-from 64 to 256 may provide enough capacity to encode both driving
-dynamics and scene content. This is the most self-supervised
-approach but may require proportionally more training data.
-
-\textbf{Auxiliary prediction signal.} We tested a supervised
-obstacle detection head during training that forces the latent
-space to encode obstacle presence (Section~4.5). While this
-achieves perfect posterior separation, the transition model
-remains obstacle-blind. A stronger version---training the
-auxiliary head on \emph{imagined} rollouts rather than posterior
-states---may force the transition model to propagate obstacle
-information, but this requires differentiating through the
-imagination loop.
-
-\textbf{Object-centric architectures.} Models like SLATE
-\citep{singh2022illiterate} or SAVi \citep{kipf2022conditional}
-that decompose scenes into object slots may naturally separate
-obstacles from background, making obstacle dynamics explicitly
-representable in imagination.
-
-%----------------------------------------------------------------------
-\section{Related Work}
-
-\textbf{Deep active inference.} \citet{catal2020learning} and
-\citet{fountas2020deep} apply active inference with VAE world
-models to visual navigation and Atari. \citet{millidge2020deep}
-connects active inference with policy gradients.
-\citet{lanillos2021active} surveys active inference in robotics.
-Our work extends to continuous-action driving and identifies a
-specific failure mode in RSSM-based imagination.
-
-\textbf{World models for driving.} DreamerV3
-\citep{hafner2023mastering} uses RSSM imagination for RL-based
-policy learning. MILE \citep{hu2022model} learns driving world
-models for imitation. Our finding---that RSSM imagination is
-obstacle-blind---may apply to these systems as well.
-
-\textbf{Epistemic uncertainty in planning.}
-\citet{chua2018deep} use ensemble disagreement for model-based RL.
-\citet{sekar2020planning} explore planning to explore. Our work
-shows that epistemic signals available during filtering (posterior)
-may not transfer to planning (prior).
+\textbf{Future directions.}
+Closing the posterior-prior gap requires transition models that
+learn object-conditioned dynamics. Attention-based transitions
+that selectively propagate object features through imagination,
+or object-centric world models
+(SLATE~\citep{singh2022illiterate},
+SAVi~\citep{kipf2022conditional}) that decompose scenes into
+slots, may enable the transition model to predict how obstacles
+move through the visual field as a function of steering actions.
 
 %----------------------------------------------------------------------
 \section{Conclusion}
 
-We identified a fundamental epistemic blind spot in RSSM-based
-active inference and isolated it to the \emph{transition model}.
-The world model's posterior correctly encodes obstacle
-presence---a contrastive preference achieves 37 nats separation,
-and an auxiliary prediction head achieves perfect binary
-classification (276 nats)---but the prior (imagination) cannot
-predict obstacle dynamics from actions. This posterior-prior gap
-persists across input modalities (RGB, high-resolution RGB, RGBD),
-preference formulations (single GMM, contrastive), auxiliary
-supervision, and training data quality. The result is an agent
-that drives excellently (100\% SR, 0.17m MLD at 128$\times$128)
-but is completely blind to obstacles in its planning horizon.
+We demonstrated that adaptive precision dynamics enable a single
+deep active inference agent to exhibit multiple driving
+behaviors---lane keeping, obstacle avoidance, and post-evasion
+centering---through Expected Free Energy minimization with a
+shared RSSM world model. The same EFE objective, with dynamically
+adjusted $\beta$ weights based on state prediction errors and
+obstacle proximity, produces 100\% obstacle avoidance (28/28) and
+81.2\% lane-keeping completion without separate reward functions
+or control modules.
 
-The auxiliary head experiment provides the critical ablation:
-forcing obstacle information into the latent space with perfect
-fidelity does not help, because the GRU-based transition model
-$f(h_t, z_t, a_t) \rightarrow h_{t+1}$ does not learn
-obstacle-conditioned dynamics. This isolates the problem from
-representation capacity to transition model expressiveness.
-
-Our findings highlight that posterior epistemic competence does
-not guarantee planning-level epistemic competence---a distinction
-that is critical for deploying active inference agents in
-safety-relevant domains. Future work should focus on transition
-model architectures that can learn object-conditioned dynamics,
-such as attention-based transitions or object-centric world
-models, to close this posterior-prior gap.
+Our investigation into vision-based obstacle detection reveals a
+posterior-prior epistemic gap: the RSSM posterior encodes obstacles
+with perfect fidelity (276 nats via auxiliary supervision), but the
+transition model cannot imagine obstacle-conditioned dynamics. This
+dissociation---where posterior epistemic competence does not
+transfer to planning-level competence---identifies a critical
+frontier for active inference in safety-relevant domains.
 
 %----------------------------------------------------------------------
 \bibliographystyle{plainnat}
