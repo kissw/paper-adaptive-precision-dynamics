@@ -3,6 +3,9 @@
 \usepackage{eiml_icml2026}
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{booktabs}
+\usepackage{tikz}
+\usepackage{graphicx}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
 
 \title{Adaptive Precision Dynamics in Deep Active Inference:\\
 Emerging Driving Behaviors from a Single World Model}
@@ -184,7 +187,72 @@ prediction), and 5-head EnsembleTransitionHeads (epistemic
 uncertainty). Training minimizes Variational Free Energy (VFE)
 with dual KL divergence~\citep{hafner2023mastering}, image and
 state reconstruction losses, on 96K frames of expert driving from
-CARLA Towns 04 and 06.
+CARLA Towns 04 and 06. Figure~\ref{fig:system} shows the system
+overview.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=0.6cm and 0.8cm,
+    block/.style={rectangle, draw, rounded corners, minimum height=0.7cm,
+                  minimum width=1.6cm, font=\small, align=center,
+                  fill=#1!15, draw=#1!60},
+    block/.default=blue,
+    arr/.style={-{Stealth[length=2mm]}, thick},
+    label/.style={font=\scriptsize, text=gray!70!black},
+]
+% Main loop
+\node[block=teal] (obs) {64$\times$64 RGB\\+ 4D state};
+\node[block=blue, right=of obs] (enc) {Conv\\Encoder};
+\node[block=blue, right=of enc] (rssm) {RSSM\\$h_t, z_t$};
+\node[block=orange, right=of rssm] (cem) {iCEM\\Planner};
+\node[block=red, right=of cem] (act) {Action\\$[s, a]$};
+
+% EFE components below CEM
+\node[block=orange, below=0.8cm of cem, minimum width=3.8cm] (efe)
+    {EFE: $\beta_i G_i - \beta_e G_e + \beta_s G_s + \beta_o G_o$};
+
+% Precision dynamics
+\node[block=purple, below=0.5cm of efe, minimum width=3.8cm] (prec)
+    {Adaptive Precision: $\beta_i, \beta_s, \beta_o$};
+
+% Decoders and models
+\node[block=green!60!black, below=0.8cm of rssm] (dec) {State / Obs\\Decoder};
+\node[block=green!60!black, below=0.8cm of enc] (pref) {GMM\\Preference};
+\node[block=green!60!black, below=0.8cm of obs] (ens) {Ensemble\\(5 heads)};
+
+% Arrows - main loop
+\draw[arr] (obs) -- (enc);
+\draw[arr] (enc) -- (rssm);
+\draw[arr] (rssm) -- node[above, label] {imagine} (cem);
+\draw[arr] (cem) -- (act);
+\draw[arr, dashed, gray] (act.south) -- ++(0,-2.2) -| (obs.south)
+    node[pos=0.25, below, label] {CARLA env};
+
+% Arrows - EFE
+\draw[arr] (efe) -- (cem);
+\draw[arr] (prec) -- (efe);
+
+% Arrows - components to EFE
+\draw[arr, blue!60] (dec) -- (efe);
+\draw[arr, blue!60] (pref) |- (efe);
+\draw[arr, blue!60] (ens) |- (efe);
+
+% Arrows - RSSM to decoders
+\draw[arr, gray, dashed] (rssm) -- (dec);
+
+% State error to precision
+\draw[arr, purple!60] (obs.south) ++ (0, -0.3) -- ++(0, -1.6) -| (prec.west)
+    node[pos=0.0, right, label] {state error};
+\end{tikzpicture}
+}
+\caption{System overview. The agent observes, encodes, updates the
+RSSM posterior, and plans via iCEM with multi-component EFE scoring.
+Adaptive precision dynamics modulate $\beta$ weights based on state
+prediction errors and obstacle proximity.}
+\label{fig:system}
+\end{figure}
 
 \subsection{Multi-Component EFE}
 
@@ -273,6 +341,17 @@ with $\beta_o{=}40.0$ for obstacle avoidance.
 \section{Emergent Driving Behaviors}
 
 All experiments use CARLA 0.9.16 with synchronous mode at 20~FPS.
+Figure~\ref{fig:routes} shows the evaluation routes.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/routes.pdf}
+\caption{Evaluation routes. Left: Task~A moderate curves in Town04
+(378m, heading changes 0\degree--85\degree). Right: Task~B highway
+in Town06 (518m, 3 static obstacles in ego lane).
+Green circle: start. Red triangle: goal. Red squares: obstacles.}
+\label{fig:routes}
+\end{figure}
 
 \subsection{Task A: Lane Keeping}
 
@@ -333,6 +412,17 @@ $\beta_o{=}0$), Task~B emphasizes obstacle avoidance
 temporarily blends both. This demonstrates that adaptive precision
 dynamics---not separate models or reward functions---can orchestrate
 multiple behaviors within a unified active inference framework.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/results.pdf}
+\caption{Summary of results. Left: Task~A lane-keeping completion
+per episode (avg 81.2\%). Center: Task~B obstacle avoidance across
+three routes (28/28, 100\%). Right: Posterior preference gap across
+methods---the auxiliary head achieves +133 nats but avoidance
+remains 0\%, isolating the blind spot to the transition model.}
+\label{fig:results}
+\end{figure}
 
 %----------------------------------------------------------------------
 \section{Toward Vision-Based Obstacle Detection}
