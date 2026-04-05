@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Adaptive Precision Dynamics in Deep Active Inference</title>
+
+<style>
+:root{
+  --bg:#0b1220;
+  --bg-grad-1:rgba(61,214,208,.22);
+  --bg-grad-2:rgba(106,167,255,.16);
+  --card-bg-start:rgba(255,255,255,.04);
+  --card-bg-end:rgba(255,255,255,.02);
+  --text:#e7eefc;
+  --muted:#a7b4d0;
+  --border:rgba(255,255,255,.10);
+  --shadow:0 14px 40px rgba(0,0,0,.35);
+  --accent:#3dd6d0;
+  --figure-bg:rgba(0,0,0,.18);
+  --table-bg:rgba(0,0,0,.14);
+  --table-head:rgba(255,255,255,.04);
+  --citation-bg:#0b1220;
+  --citation-text:#e6edf3;
+}
+
+html[data-theme="light"]{
+  --bg:#f4f7fb;
+  --bg-grad-1:rgba(61,214,208,.10);
+  --bg-grad-2:rgba(106,167,255,.10);
+  --card-bg-start:rgba(255,255,255,.90);
+  --card-bg-end:rgba(255,255,255,.78);
+  --text:#10203a;
+  --muted:#5e6f8f;
+  --border:rgba(16,32,58,.12);
+  --shadow:0 12px 30px rgba(16,32,58,.10);
+  --accent:#0f8f97;
+  --figure-bg:rgba(16,32,58,.04);
+  --table-bg:#ffffff;
+  --table-head:rgba(16,32,58,.05);
+  --citation-bg:#eef3fb;
+  --citation-text:#10203a;
+}
+
+*{box-sizing:border-box}
+
+body{
+  margin:0;
+  font-family:ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+  background:
+    radial-gradient(1200px 600px at 20% -10%, var(--bg-grad-1), transparent 55%),
+    radial-gradient(900px 500px at 85% 0%, var(--bg-grad-2), transparent 50%),
+    var(--bg);
+  color:var(--text);
+  line-height:1.55;
+  transition:background .25s ease, color .25s ease;
+}
+
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+.wrap{
+  width:1100px;
+  max-width:none;
+  margin:0 auto;
+  padding:34px 18px 70px;
+}
+
+.topbar{
+  display:flex;
+  justify-content:flex-end;
+  margin-bottom:14px;
+}
+
+.theme-toggle{
+  border:1px solid var(--border);
+  background:linear-gradient(180deg,var(--card-bg-start),var(--card-bg-end));
+  color:var(--text);
+  border-radius:10px;
+  padding:10px 14px;
+  cursor:pointer;
+  box-shadow:var(--shadow);
+}
+
+.hero,
+.card{
+  width:100%;
+  background:linear-gradient(180deg,var(--card-bg-start),var(--card-bg-end));
+  border:1px solid var(--border);
+  box-shadow:var(--shadow);
+  transition:background .25s ease, border-color .25s ease, color .25s ease;
+}
+
+.hero{
+  box-sizing:border-box;
+  border-radius:18px;
+  padding:40px 30px 30px;
+  margin-bottom:20px;
+}
+
+.hero-inner{
+  width:100%;
+  max-width:none;
+  margin:0;
+}
+
+.hero-badge{
+  font-size:14px;
+  color:var(--muted);
+  margin-bottom:10px;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex-wrap:wrap;
+}
+
+.hero-badge .dot{
+  width:8px;
+  height:8px;
+  background:#2ecc71;
+  border-radius:50%;
+}
+
+.hero-badge .status{
+  margin-left:auto;
+  font-size:12px;
+  color:var(--muted);
+}
+
+.hero h1{
+  font-size:34px;
+  line-height:1.25;
+  margin-bottom:14px;
+}
+
+.subtitle{
+  font-size:18px;
+  color:var(--muted);
+  margin-bottom:16px;
+}
+
+.authors{
+  font-size:18px;
+  margin-bottom:4px;
+}
+
+.affiliation{
+  color:var(--muted);
+  margin-bottom:20px;
+}
+
+.hero-buttons{
+  display:flex;
+  gap:12px;
+  flex-wrap:wrap;
+}
+
+.btn{
+  padding:10px 16px;
+  border-radius:10px;
+  border:1px solid var(--border);
+  background:linear-gradient(180deg,var(--card-bg-start),var(--card-bg-end));
+  color:var(--accent);
+  font-weight:500;
+}
+
+.btn:hover{
+  text-decoration:none;
+}
+
+.grid{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:16px;
+}
+
+.card{
+  border-radius:18px;
+  padding:18px;
+}
+
+.two{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:16px;
+}
+
+.section-title{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-bottom:6px;
+}
+
+.dot{
+  width:10px;
+  height:10px;
+  border-radius:999px;
+  background:var(--accent);
+  box-shadow:0 0 0 4px rgba(61,214,208,.12);
+}
+
+.figure{
+  margin-top:14px;
+  padding:14px;
+  border-radius:14px;
+  background:var(--figure-bg);
+  border:1px solid var(--border);
+}
+
+.figure img{
+  width:100%;
+  border-radius:12px;
+  display:block;
+}
+
+.figcap{
+  margin-top:8px;
+  color:var(--muted);
+  font-size:13px;
+}
+
+.divider{
+  height:1px;
+  background:var(--border);
+  margin:14px 0;
+}
+
+table{
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0;
+  border-radius:14px;
+  border:1px solid var(--border);
+  background:var(--table-bg);
+  font-size:14px;
+}
+
+th,td{
+  padding:10px 12px;
+  border-bottom:1px solid var(--border);
+  text-align:center;
+}
+
+th{
+  background:var(--table-head);
+}
+
+.note{
+  color:var(--muted);
+  font-size:13px;
+  margin-top:10px;
+}
+
+.citation-box{
+  background:var(--citation-bg);
+  border-radius:10px;
+  padding:16px;
+  margin-top:10px;
+  overflow-x:auto;
+  border:1px solid var(--border);
+}
+
+.citation-box pre{
+  margin:0;
+  color:var(--citation-text);
+  font-size:14px;
+}
+
+.pill-box{
+  background:rgba(255,255,255,.04);
+  border:1px solid var(--border);
+  border-radius:12px;
+  padding:12px;
+}
+
+.pill-title{
+  font-size:12px;
+  color:var(--muted);
+  margin-bottom:4px;
+  letter-spacing:.04em;
+}
+
+.pill-text{
+  font-size:14px;
+  color:var(--text);
+  font-weight:500;
+}
+
+footer{
+  margin-top:30px;
+  padding-top:18px;
+  border-top:1px solid var(--border);
+  text-align:center;
+  font-size:14px;
+  color:var(--muted);
+}
+
+.topbar,
+.hero,
+.grid,
+footer{
+  width:100%;
+}
+
+html, body{
+  min-width: 1200px;
+}
+
+body{
+  overflow-x:auto;
+}
+</style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme">
+        Toggle light/dark
+      </button>
+    </div>
+    <header class="hero">
+      <div class="hero-inner">
+
+        <div class="hero-badge">
+          <span class="dot"></span>
+          EIML @ ICML 2026
+          <span class="status">STATUS: under review</span>
+        </div>
+
+        <h1>
+          Adaptive Precision Dynamics in Deep Active Inference:<br>
+          Emerging Driving Behaviors from a Single World Model
+        </h1>
+
+        <p class="subtitle">
+          Lane keeping, obstacle avoidance, and post-evasion centering emerge
+          from a single EFE objective via adaptive precision-weighting.
+        </p>
+
+        <div class="authors">
+          <strong>Jaerock Kwon</strong><sup>1</sup> ·
+          <strong>Elahe Delavari</strong><sup>1</sup> ·
+          <strong>Donghyun Kim</strong><sup>2</sup> ·
+          <strong>Haewoon Nam</strong><sup>2</sup>
+        </div>
+
+        <div class="affiliation">
+          <sup>1</sup> University of Michigan – Dearborn ·
+          <sup>2</sup> Hanyang University, South Korea
+        </div>
+
+        <div class="hero-buttons">
+          <a class="btn" href="https://github.com/bimilab/paper-adaptive-precision-dynamics">
+            Code & Docs
+          </a>
+          <a class="btn" href="#">
+            Paper (coming soon)
+          </a>
+          <a class="btn" href="#citation">
+            Citation
+          </a>
+        </div>
+
+      </div>
+    </header>
+
+    <div class="grid">
+
+      <!-- RESEARCH OVERVIEW -->
+      <div class="card">
+        <div class="section-title"><span class="dot"></span><h2 style="margin:0">Research Overview</h2></div>
+
+        <p style="margin:8px 0 0">
+          <b>Problem.</b> Active inference promises unified perception, learning, and action through free energy minimization.
+          But can a single EFE objective produce <em>multiple</em> distinct driving behaviors? And can safety-critical
+          obstacle detection emerge from the learned latent space?
+        </p>
+
+        <div class="divider"></div>
+
+        <p style="margin:0"><b>Contributions.</b></p>
+        <ul style="margin:8px 0 0; color:var(--muted)">
+          <li>A <b>multi-component EFE formulation</b> combining latent-space instrumental value (GMM), ensemble-based epistemic value, decoded state-space preferences, and obstacle penalties.</li>
+          <li>An <b>adaptive precision-weighting mechanism</b> where sensory prediction errors dynamically modulate EFE component weights, enabling lane keeping, obstacle avoidance, and post-evasion centering from a shared world model.</li>
+          <li>A <b>posterior-prior epistemic gap</b> discovery: the RSSM posterior perfectly encodes obstacles (276 nats via auxiliary head), but the transition model cannot propagate this through imagination — isolated via controlled ablation.</li>
+        </ul>
+      </div>
+
+      <!-- METHOD -->
+      <div class="card">
+        <div class="section-title"><span class="dot"></span><h2 style="margin:0">Method: Adaptive Precision Dynamics</h2></div>
+
+        <p class="note" style="margin-top:8px">
+          The agent loop: <b>Observe → Encode → RSSM Posterior → iCEM Plan (EFE Scoring) → Act</b>.
+          A single world model (RSSM, deter=256, stoch=64) is shared across all tasks. Behavioral differences
+          emerge entirely from runtime modulation of EFE precision weights β<sub>i</sub>, β<sub>s</sub>, β<sub>o</sub>.
+        </p>
+
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:14px;">
+          <div class="pill-box">
+            <div class="pill-title">STATE ERROR MODULATION</div>
+            <div class="pill-text">High error → β<sub>s</sub>↑, β<sub>i</sub>↓</div>
+          </div>
+          <div class="pill-box">
+            <div class="pill-title">OBSTACLE PROXIMITY</div>
+            <div class="pill-text">Near obstacle → β<sub>i</sub>↓ (suppress preference)</div>
+          </div>
+          <div class="pill-box">
+            <div class="pill-title">POST-EVASION</div>
+            <div class="pill-text">After clearance → β<sub>s</sub>=0.5 (centering)</div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <h3 style="margin:0 0 10px; font-size:16px;">Task-Specific Precision Configurations</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Parameter</th>
+              <th>Task A (Lane Keeping)</th>
+              <th>Task B (Obstacle Avoidance)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>β<sub>instrumental</sub></td><td>1.0</td><td>1.0</td></tr>
+            <tr><td>β<sub>epistemic</sub></td><td>0.1</td><td>0.1</td></tr>
+            <tr><td>β<sub>state</sub></td><td>0.5</td><td>0.0</td></tr>
+            <tr><td>β<sub>obstacle</sub></td><td>0.0</td><td>40.0</td></tr>
+            <tr><td>Horizon</td><td>12</td><td>15</td></tr>
+          </tbody>
+        </table>
+        <p class="note">Same world model checkpoint. Only β weights and horizon differ between tasks.</p>
+      </div>
+
+      <!-- RESULTS -->
+      <div class="card">
+        <div class="section-title"><span class="dot"></span><h2 style="margin:0">Results</h2></div>
+
+        <div class="two" style="margin-top:12px">
+          <div>
+            <h3 style="margin:0 0 10px; font-size:16px;">Task A: Lane Keeping (Town04)</h3>
+            <table>
+              <thead><tr><th>Metric</th><th>Result</th></tr></thead>
+              <tbody>
+                <tr><td>Route completion</td><td><b>81.2%</b></td></tr>
+                <tr><td>Mean lateral deviation</td><td>0.63m</td></tr>
+                <tr><td>Route</td><td>378m, 0°–85° curves</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <h3 style="margin:0 0 10px; font-size:16px;">Task B: Obstacle Avoidance (Town06)</h3>
+            <table>
+              <thead><tr><th>Route</th><th>SR</th><th>Avoided</th><th>MLD</th></tr></thead>
+              <tbody>
+                <tr><td>R0 (373m, 2 obs)</td><td>100%</td><td>10/10</td><td>0.67</td></tr>
+                <tr><td>R1 (518m, 3 obs)</td><td>100%</td><td>9/9</td><td>0.66</td></tr>
+                <tr><td>R2 (518m, 3 alt.)</td><td>100%</td><td>9/9</td><td>0.49</td></tr>
+                <tr><td><b>Total</b></td><td><b>100%</b></td><td><b>28/28</b></td><td>0.60</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- EPISTEMIC GAP -->
+      <div class="card">
+        <div class="section-title"><span class="dot"></span><h2 style="margin:0">Posterior-Prior Epistemic Gap</h2></div>
+
+        <p style="margin:8px 0 0">
+          We investigate whether obstacle detection can emerge from the latent space alone,
+          removing all privileged obstacle coordinates. The result: a fundamental gap between
+          what the model <em>knows</em> (posterior) and what it can <em>imagine</em> (prior).
+        </p>
+
+        <div class="divider"></div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Posterior Gap (nats)</th>
+              <th>Driving (MLD)</th>
+              <th>Avoidance</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>Single GMM (64×64)</td><td>−24.6</td><td>0.31m</td><td>0%</td></tr>
+            <tr><td>Single GMM (128×128)</td><td>−2.3</td><td>0.17m</td><td>0%</td></tr>
+            <tr><td>Contrastive preference</td><td>+37.0</td><td>0.17m</td><td>0%</td></tr>
+            <tr><td><b>Auxiliary head</b></td><td><b>+276</b></td><td>0.30m</td><td><b>0%</b></td></tr>
+          </tbody>
+        </table>
+
+        <p class="note">
+          The auxiliary head achieves <b>perfect</b> posterior separation (0.000 vs 1.000) and
+          276 nats contrastive gap — yet avoidance remains at 0%. This isolates the blind spot
+          to the RSSM <b>transition model</b>: the representation is adequate, but the dynamics
+          model f(h<sub>t</sub>, z<sub>t</sub>, a<sub>t</sub>) → h<sub>t+1</sub> cannot
+          learn obstacle-conditioned dynamics.
+        </p>
+      </div>
+
+      <!-- CITATION -->
+      <div class="card" id="citation">
+        <div class="section-title">
+          <span class="dot"></span>
+          <h2 style="margin:0">Citation</h2>
+        </div>
+
+        <p class="note">
+          Use the following BibTeX entry to cite this work:
+        </p>
+
+        <div class="citation-box">
+          <pre><code>@inproceedings{kwon2026adaptive,
+  title={Adaptive Precision Dynamics in Deep Active Inference: Emerging Driving Behaviors from a Single World Model},
+  author={Kwon, Jaerock and Delavari, Elahe and Kim, Donghyun and Nam, Haewoon},
+  booktitle={EIML Workshop at ICML},
+  year={2026}
+}</code></pre>
+          <button onclick="copyCitation()">Copy</button>
+        </div>
+      </div>
+
+      <footer>
+        <p>
+          <strong>Repository:</strong>
+          <a href="https://github.com/bimilab/paper-adaptive-precision-dynamics">paper-adaptive-precision-dynamics</a>
+          ·
+          <strong>License:</strong> MIT
+          ·
+          <strong>Contact:</strong> jrkwon@umich.edu
+        </p>
+        <p>
+          &copy; 2026 Bio-Inspired Machine Intelligence (BIMI) Lab,
+          University of Michigan &ndash; Dearborn
+        </p>
+      </footer>
+    </div>
+  </div>
+
+  <script>
+  function copyCitation() {
+    const text = document.querySelector('.citation-box code').innerText;
+    navigator.clipboard.writeText(text);
+  }
+  </script>
+
+  <script>
+  (function () {
+    const root = document.documentElement;
+    const btn = document.getElementById('themeToggle');
+    const saved = localStorage.getItem('apd-theme');
+
+    if (saved === 'light' || saved === 'dark') {
+      root.setAttribute('data-theme', saved);
+    }
+
+    function updateButtonLabel() {
+      const theme = root.getAttribute('data-theme') || 'dark';
+      btn.textContent = theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode';
+    }
+
+    btn.addEventListener('click', function () {
+      const current = root.getAttribute('data-theme') || 'dark';
+      const next = current === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      localStorage.setItem('apd-theme', next);
+      updateButtonLabel();
+    });
+
+    updateButtonLabel();
+  })();
+  </script>
+</body>
+</html>
