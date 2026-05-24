@@ -5,8 +5,8 @@ description = "Deep Active Inference agent for autonomous driving in CARLA"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.5.0",
-    "torchvision>=0.20.0",
+    "torch==2.5.1",
+    "torchvision==0.20.1",
     "numpy>=1.26.0",
     "scipy>=1.13.0",
     "h5py>=3.11.0",
@@ -39,16 +39,24 @@ collect = "active_inference.scripts.collect_data:main"
 evaluate = "active_inference.scripts.evaluate:main"
 
 [tool.uv]
-torch-backend = "auto"
+torch-backend = "cu118"
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu118", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
-explicit = true
-
-[[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [dependency-groups]
