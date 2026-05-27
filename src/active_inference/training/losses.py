@@ -22,7 +22,9 @@ def compute_vfe(
     post = Normal(post_mean, post_std)
     prior = Normal(prior_mean, prior_std)
 
-    # Dual KL: dyn trains prior (post detached), rep trains posterior (prior detached)
+    # Dual KL: dyn trains prior (post detached), rep trains posterior (prior detached).
+    # .sum(-1) reduces the stochastic dim Z; .mean() then averages over all remaining
+    # prefix dims (B for RSSM; B×N for token-level world models).  Both shapes work.
     dyn_loss = kl_divergence(Normal(post_mean.detach(), post_std.detach()), prior).sum(-1).mean()
     rep_loss = kl_divergence(post, Normal(prior_mean.detach(), prior_std.detach())).sum(-1).mean()
 

@@ -113,6 +113,30 @@ class DataConfig:
 
 
 @dataclass
+class ModelConfig:
+    world_model_type: str = "rssm"  # "rssm" | "token_vit"
+
+
+@dataclass
+class TokenViTConfig:
+    image_size: int = 64
+    patch_size: int = 8
+    num_tokens: int = 64       # (image_size // patch_size) ** 2
+    embed_dim: int = 256
+    deter_dim: int = 256
+    stoch_dim: int = 64
+    feat_dim: int = 320        # deter_dim + stoch_dim
+    num_layers: int = 4        # encoder transformer depth
+    num_prior_layers: int = 2  # prior transition transformer depth
+    num_post_layers: int = 2   # posterior transformer depth
+    num_heads: int = 8
+    mlp_ratio: float = 4.0
+    dropout: float = 0.0
+    min_std: float = 0.1
+    action_dim: int = 2
+
+
+@dataclass
 class Config:
     seed: int = 42
     device: str = "cuda"
@@ -126,6 +150,8 @@ class Config:
     efe: EFEConfig = field(default_factory=EFEConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    token_vit: TokenViTConfig = field(default_factory=TokenViTConfig)
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Config:

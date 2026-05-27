@@ -20,27 +20,77 @@ from active_inference.training.preference import PreferenceModel
 class WorldModel(nn.Module):
     def __init__(self, cfg: Config):
         super().__init__()
-        self.encoder = ConvEncoder(
-            image_channels=cfg.encoder.image_channels,
-            state_dim=cfg.encoder.state_dim,
-            embed_dim=cfg.rssm.embed_dim,
-            crop_road=getattr(cfg.encoder, "crop_road", False),
-        )
-        feat_dim = cfg.rssm.deter_dim + cfg.rssm.stoch_dim
-        self.obs_decoder = ObsDecoder(feat_dim=feat_dim, image_channels=cfg.encoder.image_channels)
-        self.state_decoder = StateDecoder(feat_dim=feat_dim, state_dim=cfg.encoder.state_dim)
-        self.rssm = RSSM(
-            stoch_dim=cfg.rssm.stoch_dim,
-            deter_dim=cfg.rssm.deter_dim,
-            embed_dim=cfg.rssm.embed_dim,
-            action_dim=cfg.cem.action_dim,
-            min_std=cfg.rssm.min_std,
-            logvar_clip_low=cfg.rssm.logvar_clip_low,
-            logvar_clip_high=cfg.rssm.logvar_clip_high,
-        )
+        wm_type = getattr(getattr(cfg, "model", None), "world_model_type", "rssm")
+        self._wm_type = wm_type
+
+        if wm_type == "rssm":
+            self.encoder = ConvEncoder(
+                image_channels=cfg.encoder.image_channels,
+                state_dim=cfg.encoder.state_dim,
+                embed_dim=cfg.rssm.embed_dim,
+                crop_road=getattr(cfg.encoder, "crop_road", False),
+            )
+            feat_dim = cfg.rssm.deter_dim + cfg.rssm.stoch_dim
+            self.obs_decoder = ObsDecoder(feat_dim=feat_dim, image_channels=cfg.encoder.image_channels)
+            self.state_decoder = StateDecoder(feat_dim=feat_dim, state_dim=cfg.encoder.state_dim)
+            self.rssm = RSSM(
+                stoch_dim=cfg.rssm.stoch_dim,
+                deter_dim=cfg.rssm.deter_dim,
+                embed_dim=cfg.rssm.embed_dim,
+                action_dim=cfg.cem.action_dim,
+                min_std=cfg.rssm.min_std,
+                logvar_clip_low=cfg.rssm.logvar_clip_low,
+                logvar_clip_high=cfg.rssm.logvar_clip_high,
+            )
+
+        elif wm_type == "token_vit":
+            from active_inference.models.token_vit import (
+                TokenViTEncoder,
+                TokenViTTransition,
+                TokenImageDecoder,
+                TokenStateDecoder,
+            )
+            tv = cfg.token_vit
+            feat_dim = tv.feat_dim  # deter_dim + stoch_dim = 320
+            self.encoder = TokenViTEncoder(
+                image_size=tv.image_size,
+                patch_size=tv.patch_size,
+                embed_dim=tv.embed_dim,
+                state_dim=cfg.encoder.state_dim,
+                num_layers=tv.num_layers,
+                num_heads=tv.num_heads,
+                mlp_ratio=tv.mlp_ratio,
+                dropout=tv.dropout,
+            )
+            self.rssm = TokenViTTransition(
+                num_tokens=tv.num_tokens,
+                embed_dim=tv.embed_dim,
+                deter_dim=tv.deter_dim,
+                stoch_dim=tv.stoch_dim,
+                action_dim=getattr(tv, "action_dim", cfg.cem.action_dim),
+                num_prior_layers=tv.num_prior_layers,
+                num_post_layers=tv.num_post_layers,
+                num_heads=tv.num_heads,
+                mlp_ratio=tv.mlp_ratio,
+                min_std=tv.min_std,
+            )
+            self.obs_decoder = TokenImageDecoder(
+                num_tokens=tv.num_tokens,
+                deter_dim=tv.deter_dim,
+                stoch_dim=tv.stoch_dim,
+                image_channels=cfg.encoder.image_channels,
+            )
+            self.state_decoder = TokenStateDecoder(
+                feat_dim=feat_dim,
+                state_dim=cfg.encoder.state_dim,
+            )
+
+        else:
+            raise ValueError(f"Unknown world_model_type: {wm_type!r}")
+
         self.ensemble = EnsembleTransitionHeads(
             feat_dim=feat_dim,
-            stoch_dim=cfg.rssm.stoch_dim,
+            stoch_dim=cfg.rssm.stoch_dim if wm_type == "rssm" else cfg.token_vit.stoch_dim,
             hidden_dim=cfg.ensemble.hidden_dim,
             num_heads=cfg.ensemble.num_heads,
         )
@@ -53,6 +103,13 @@ class WorldModel(nn.Module):
             nn.ReLU(),
             nn.Linear(128, 1),
         )
+
+    def decode_obs(self, post: RSSMState) -> "torch.Tensor":
+        """Decode observation from posterior state, routing by model type."""
+        if self._wm_type == "rssm":
+            return self.obs_decoder(self.rssm.get_feat(post))
+        # token_vit: decoder reads flat deter/stoch directly.
+        return self.obs_decoder(post.deter, post.stoch)
 
 
 class DeepAIFAgent:
@@ -156,14 +213,21 @@ class DeepAIFAgent:
         # Pass to EFE scorer so imagined trajectories that keep the
         # obstacle in view are penalized.
         feat = self.world_model.rssm.get_feat(post)
-        recon_img = self.world_model.obs_decoder(feat)
+        recon_img = self.world_model.decode_obs(post)
         recon_error = float(
             (recon_img - img).pow(2).sum(dim=(1, 2, 3)).item()
+        )
+        # TokenViT decoder takes (deter, stoch) not a single feat tensor;
+        # pass None so EFEScorer skips the visual-surprise path for v1.
+        efe_obs_decoder = (
+            self.world_model.obs_decoder
+            if self.world_model._wm_type == "rssm"
+            else None
         )
         visual_info = {
             "recon_error": recon_error,
             "ref_image": img.detach(),
-            "obs_decoder": self.world_model.obs_decoder,
+            "obs_decoder": efe_obs_decoder,
         }
 
         plan_result = self.planner.plan(
@@ -230,7 +294,7 @@ class DeepAIFAgent:
                 )
 
                 feat = wm.rssm.get_feat(post)
-                recon_img = wm.obs_decoder(feat)
+                recon_img = wm.decode_obs(post)
                 recon_state = wm.state_decoder(feat)
 
                 loss, info = compute_vfe(
