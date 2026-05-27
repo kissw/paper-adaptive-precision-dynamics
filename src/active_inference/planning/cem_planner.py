@@ -154,7 +154,7 @@ class iCEMPlanner:
             # Batch-parallel rollout
             n_actions = actions.shape[0]
             expanded = type(initial_state)(
-                *[x.expand(n_actions, -1) for x in initial_state]
+                *[x.expand(n_actions, *x.shape[1:]) for x in initial_state]
             )
             trajectory = rssm.imagine(
                 expanded, actions.permute(1, 0, 2),

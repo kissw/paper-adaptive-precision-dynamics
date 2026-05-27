@@ -4,20 +4,26 @@ Spatial token dynamics are preserved end-to-end through the transition.
 The transition operates on a (B, N, D) token grid and never collapses
 tokens to a global vector internally.
 
-State layout uses 2D flattened tensors for iCEM planner compatibility.
-The planner's `x.expand(n_samples, -1)` pattern requires all state
-fields to be 2D, so token dims are folded into the last axis:
+State layout (TokenRSSMState — 6 fields):
 
-  deter : (B, N*D_deter)  — flattened token deterministic context
-  stoch : (B, N*Z)        — flattened token stochastic samples
-  mean  : (B, Z)          — pooled mean  (EFE/GMM interface)
-  std   : (B, Z)          — pooled std   (EFE/GMM interface)
+  deter      : (B, N, D_deter)  — 3D token deterministic context
+  stoch      : (B, N, Z)        — 3D token stochastic samples
+  mean       : (B, Z)           — pooled mean  (EFE/GMM interface)
+  std        : (B, Z)           — pooled std   (EFE/GMM interface)
+  token_mean : (B, N, Z)        — per-token mean for VFE KL
+  token_std  : (B, N, Z)        — per-token std  for VFE KL
 
-All spatial operations reshape internally; pooling for the legacy
-(B, feat_dim) interface is isolated to get_feat() and the state decoder.
+EFE/GMM sees pooled (B, Z) mean/std so the preference model receives the
+expected shape.  VFE uses token_mean/token_std so KL is computed token-wise
+(KL.sum(-1).mean() handles both (B,Z) and (B,N,Z) shapes).
+
+iCEM expand uses x.expand(n_samples, *x.shape[1:]) which is generic for
+any number of trailing dims, so 3D deter/stoch fields work correctly.
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 import torch
 import torch.nn as nn
@@ -25,7 +31,18 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.distributions import Normal
 
-from active_inference.models.rssm import RSSMState
+
+# ---------------------------------------------------------------------------
+# TokenRSSMState
+# ---------------------------------------------------------------------------
+
+class TokenRSSMState(NamedTuple):
+    deter: Tensor       # (B, N, D) — 3D token deterministic context
+    stoch: Tensor       # (B, N, Z) — 3D token stochastic sample
+    mean: Tensor        # (B, Z)    — pooled, for EFE/GMM compatibility
+    std: Tensor         # (B, Z)    — pooled, for EFE/GMM compatibility
+    token_mean: Tensor  # (B, N, Z) — per-token, for VFE KL
+    token_std: Tensor   # (B, N, Z) — per-token, for VFE KL
 
 
 # ---------------------------------------------------------------------------
@@ -208,31 +225,35 @@ class TokenViTTransition(nn.Module):
         token_mean: Tensor,  # (B, N, Z)
         token_std: Tensor,   # (B, N, Z)
         stoch: Tensor,       # (B, N, Z)
-    ) -> RSSMState:
-        B = deter.shape[0]
+    ) -> TokenRSSMState:
         pooled_mean, pooled_std = self._pool_stats(token_mean, token_std)
-        return RSSMState(
-            deter=deter.reshape(B, self._N * self._D),
-            stoch=stoch.reshape(B, self._N * self._Z),
-            mean=pooled_mean,   # (B, Z) — for EFE/GMM
-            std=pooled_std,     # (B, Z) — for EFE/GMM
+        return TokenRSSMState(
+            deter=deter,
+            stoch=stoch,
+            mean=pooled_mean,         # (B, Z) — for EFE/GMM
+            std=pooled_std,           # (B, Z) — for EFE/GMM
+            token_mean=token_mean,    # (B, N, Z) — for VFE KL
+            token_std=token_std,      # (B, N, Z) — for VFE KL
         )
 
     # ------------------------------------------------------------------
     # RSSM-compatible interface
     # ------------------------------------------------------------------
 
-    def initial(self, batch_size: int, device: torch.device | None = None) -> RSSMState:
+    def initial(self, batch_size: int, device: torch.device | None = None) -> TokenRSSMState:
         if device is None:
             device = next(self.parameters()).device
-        return RSSMState(
-            deter=torch.zeros(batch_size, self._N * self._D, device=device),
-            stoch=torch.zeros(batch_size, self._N * self._Z, device=device),
-            mean=torch.zeros(batch_size, self._Z, device=device),
-            std=torch.ones(batch_size, self._Z, device=device),
+        N, D, Z = self._N, self._D, self._Z
+        return TokenRSSMState(
+            deter=torch.zeros(batch_size, N, D, device=device),
+            stoch=torch.zeros(batch_size, N, Z, device=device),
+            mean=torch.zeros(batch_size, Z, device=device),
+            std=torch.ones(batch_size, Z, device=device),
+            token_mean=torch.zeros(batch_size, N, Z, device=device),
+            token_std=torch.ones(batch_size, N, Z, device=device),
         )
 
-    def get_feat(self, state: RSSMState) -> Tensor:
+    def get_feat(self, state: TokenRSSMState) -> Tensor:
         """Pool token features to (B, feat_dim=320) for legacy interfaces.
 
         Uses mean+max concatenation to preserve localized token evidence
@@ -240,48 +261,43 @@ class TokenViTTransition(nn.Module):
         Only called by EFE scorer, iCEM, and state/image decoders that
         expect the legacy (B, 320) interface.
         """
-        B = state.deter.shape[0]
-        deter = state.deter.view(B, self._N, self._D)    # (B, N, D)
-        stoch = state.stoch.view(B, self._N, self._Z)    # (B, N, Z)
-        tok = torch.cat([deter, stoch], dim=-1)          # (B, N, 320)
-        mean_p = tok.mean(dim=1)                          # (B, 320)
-        max_p = tok.max(dim=1).values                     # (B, 320)
+        tok = torch.cat([state.deter, state.stoch], dim=-1)  # (B, N, 320)
+        mean_p = tok.mean(dim=1)                              # (B, 320)
+        max_p = tok.max(dim=1).values                         # (B, 320)
         return self._feat_adapter(
-            torch.cat([mean_p, max_p], dim=-1)            # (B, 640)
-        )                                                  # (B, 320)
+            torch.cat([mean_p, max_p], dim=-1)                # (B, 640)
+        )                                                      # (B, 320)
 
-    def get_dist(self, state: RSSMState) -> Normal:
+    def get_dist(self, state: TokenRSSMState) -> Normal:
         return Normal(state.mean, state.std)
 
-    def img_step(self, prev_state: RSSMState, prev_action: Tensor) -> RSSMState:
+    def img_step(self, prev_state: TokenRSSMState, prev_action: Tensor) -> TokenRSSMState:
         """Prior transition: propagate token dynamics without observations."""
-        B = prev_state.deter.shape[0]
-        deter = prev_state.deter.view(B, self._N, self._D)   # (B, N, D)
-        stoch = prev_state.stoch.view(B, self._N, self._Z)   # (B, N, Z)
-
-        # Project concat(prev_deter, prev_stoch) -> D.
-        x = self._in_proj(torch.cat([deter, stoch], dim=-1)) # (B, N, D)
-        x = x + self._pos_embed                               # (B, N, D)
+        # prev_state.deter: (B, N, D)  prev_state.stoch: (B, N, Z)
+        x = self._in_proj(
+            torch.cat([prev_state.deter, prev_state.stoch], dim=-1)
+        )                                                          # (B, N, D)
+        x = x + self._pos_embed                                    # (B, N, D)
 
         # Broadcast action embedding to every token.
-        act_emb = self._action_mlp(prev_action)               # (B, D)
-        x = x + act_emb.unsqueeze(1)                          # (B, N, D)
+        act_emb = self._action_mlp(prev_action)                    # (B, D)
+        x = x + act_emb.unsqueeze(1)                               # (B, N, D)
 
         # Prior transformer: new deterministic context.
-        new_deter = self._prior_transformer(x)                # (B, N, D)
+        new_deter = self._prior_transformer(x)                     # (B, N, D)
 
         # Stochastic prior head.
-        raw = self._prior_head(new_deter)                     # (B, N, Z*2)
+        raw = self._prior_head(new_deter)                          # (B, N, Z*2)
         token_mean, token_std, stoch_new = self._stoch_from_raw(raw)
 
         return self._make_state(new_deter, token_mean, token_std, stoch_new)
 
     def obs_step(
         self,
-        prev_state: RSSMState,
+        prev_state: TokenRSSMState,
         prev_action: Tensor,
         embed: Tensor,
-    ) -> tuple[RSSMState, RSSMState]:
+    ) -> tuple[TokenRSSMState, TokenRSSMState]:
         """Posterior update: fuse prior transition with observation tokens.
 
         embed: (B, N, embed_dim) from TokenViTEncoder.
@@ -289,33 +305,30 @@ class TokenViTTransition(nn.Module):
         """
         prior = self.img_step(prev_state, prev_action)
 
-        B = prior.deter.shape[0]
-        prior_deter = prior.deter.view(B, self._N, self._D)  # (B, N, D)
-
-        # Fuse prior deter tokens with observation tokens.
+        # prior.deter is already (B, N, D) — no reshape needed.
         fused = self._obs_fuse(
-            torch.cat([prior_deter, embed], dim=-1)          # (B, N, D+E)
-        )                                                     # (B, N, D)
-        fused = fused + self._pos_embed                      # (B, N, D)
+            torch.cat([prior.deter, embed], dim=-1)               # (B, N, D+E)
+        )                                                           # (B, N, D)
+        fused = fused + self._pos_embed                            # (B, N, D)
 
         # Posterior transformer.
-        post_x = self._post_transformer(fused)               # (B, N, D)
+        post_x = self._post_transformer(fused)                     # (B, N, D)
 
         # Posterior stochastic head.
-        raw = self._post_head(post_x)                        # (B, N, Z*2)
+        raw = self._post_head(post_x)                              # (B, N, Z*2)
         token_mean, token_std, stoch_post = self._stoch_from_raw(raw)
 
         # Posterior shares prior's deter (RSSM convention).
-        post = self._make_state(prior_deter, token_mean, token_std, stoch_post)
+        post = self._make_state(prior.deter, token_mean, token_std, stoch_post)
         return post, prior
 
-    def imagine(self, initial_state: RSSMState, actions: Tensor) -> list[RSSMState]:
+    def imagine(self, initial_state: TokenRSSMState, actions: Tensor) -> list[TokenRSSMState]:
         """Open-loop rollout under action sequence.
 
         actions: (H, B, action_dim)
-        Returns list of H RSSMState objects.
+        Returns list of H TokenRSSMState objects.
         """
-        states: list[RSSMState] = []
+        states: list[TokenRSSMState] = []
         state = initial_state
         for t in range(actions.shape[0]):
             state = self.img_step(state, actions[t])
@@ -328,10 +341,11 @@ class TokenViTTransition(nn.Module):
 # ---------------------------------------------------------------------------
 
 class TokenImageDecoder(nn.Module):
-    """Decode token grid back to image: (B,N*D,B,N*Z) -> (B,3,64,64).
+    """Decode token grid back to image: (B,N,D), (B,N,Z) -> (B,3,64,64).
 
-    Reshapes flat token state to spatial grid, then uses strided
-    transposed convolutions to upsample from 8x8 to 64x64.
+    forward(deter, stoch) accepts 3D token tensors directly.
+    decode_from_feat(feat) accepts pooled (B, feat_dim) from get_feat()
+    for the EFE visual-surprise path.
     """
 
     def __init__(
@@ -346,6 +360,7 @@ class TokenImageDecoder(nn.Module):
         self._num_tokens = num_tokens
         self._deter_dim = deter_dim
         self._stoch_dim = stoch_dim
+        self._dec_dim = dec_dim
         grid_side = int(num_tokens ** 0.5)   # 8
         assert grid_side * grid_side == num_tokens
 
@@ -368,19 +383,35 @@ class TokenImageDecoder(nn.Module):
             nn.Conv2d(32, image_channels, 3, padding=1),               # 64
         )
 
-    def forward(self, deter_flat: Tensor, stoch_flat: Tensor) -> Tensor:
-        # deter_flat: (B, N*D_deter)  stoch_flat: (B, N*Z)
-        B = deter_flat.shape[0]
-        deter = deter_flat.view(B, self._num_tokens, self._deter_dim)
-        stoch = stoch_flat.view(B, self._num_tokens, self._stoch_dim)
+        # For decode_from_feat: project pooled (B, feat_dim) to dec_dim,
+        # then broadcast to spatial grid for the deconv stack.
+        self._feat_proj_1d = nn.Linear(feat_dim, dec_dim)
+
+    def forward(self, deter: Tensor, stoch: Tensor) -> Tensor:
+        # deter: (B, N, D_deter)  stoch: (B, N, Z)
+        B = deter.shape[0]
         tok = torch.cat([deter, stoch], dim=-1)              # (B, N, 320)
         tok = self._tok_proj(tok)                             # (B, N, dec_dim)
         grid_side = int(self._num_tokens ** 0.5)             # 8
-        # Reshape to spatial grid and upsample.
         grid = tok.permute(0, 2, 1).view(
             B, -1, grid_side, grid_side,
         )                                                     # (B, dec_dim, 8, 8)
         return self._deconv(grid)                             # (B, 3, 64, 64)
+
+    def decode_from_feat(self, feat: Tensor) -> Tensor:
+        """Decode from pooled feature vector — used by EFE visual surprise.
+
+        feat: (B, feat_dim=320) from TokenViTTransition.get_feat()
+        Returns: (B, 3, 64, 64)
+        """
+        B = feat.shape[0]
+        grid_side = int(self._num_tokens ** 0.5)             # 8
+        x = self._feat_proj_1d(feat)                         # (B, dec_dim)
+        # Broadcast single feature to spatial grid.
+        x = x.view(B, self._dec_dim, 1, 1).expand(
+            -1, -1, grid_side, grid_side,
+        )                                                     # (B, dec_dim, 8, 8)
+        return self._deconv(x)                               # (B, 3, 64, 64)
 
 
 # ---------------------------------------------------------------------------

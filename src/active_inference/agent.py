@@ -108,8 +108,14 @@ class WorldModel(nn.Module):
         """Decode observation from posterior state, routing by model type."""
         if self._wm_type == "rssm":
             return self.obs_decoder(self.rssm.get_feat(post))
-        # token_vit: decoder reads flat deter/stoch directly.
+        # token_vit: decoder accepts 3D (B,N,D) and (B,N,Z) directly.
         return self.obs_decoder(post.deter, post.stoch)
+
+    def get_kl_stats(self, state: RSSMState) -> tuple["torch.Tensor", "torch.Tensor"]:
+        """Return (mean, std) for VFE KL computation, token-wise when available."""
+        if self._wm_type == "token_vit":
+            return state.token_mean, state.token_std  # (B, N, Z)
+        return state.mean, state.std                  # (B, Z)
 
 
 class DeepAIFAgent:
@@ -217,12 +223,10 @@ class DeepAIFAgent:
         recon_error = float(
             (recon_img - img).pow(2).sum(dim=(1, 2, 3)).item()
         )
-        # TokenViT decoder takes (deter, stoch) not a single feat tensor;
-        # pass None so EFEScorer skips the visual-surprise path for v1.
         efe_obs_decoder = (
             self.world_model.obs_decoder
             if self.world_model._wm_type == "rssm"
-            else None
+            else self.world_model.obs_decoder.decode_from_feat
         )
         visual_info = {
             "recon_error": recon_error,
@@ -297,11 +301,13 @@ class DeepAIFAgent:
                 recon_img = wm.decode_obs(post)
                 recon_state = wm.state_decoder(feat)
 
+                post_mean, post_std = wm.get_kl_stats(post)
+                prior_mean, prior_std = wm.get_kl_stats(prior)
                 loss, info = compute_vfe(
-                    post.mean,
-                    post.std,
-                    prior.mean,
-                    prior.std,
+                    post_mean,
+                    post_std,
+                    prior_mean,
+                    prior_std,
                     img_t,
                     recon_img,
                     st_t,
@@ -327,7 +333,7 @@ class DeepAIFAgent:
 
             # NaN guard: skip this timestep if loss is bad
             if torch.isnan(loss) or torch.isinf(loss):
-                prev_state = RSSMState(
+                prev_state = type(post)(
                     *[x.detach() for x in post],
                 )
                 prev_action = (
@@ -346,7 +352,7 @@ class DeepAIFAgent:
                 accum[k] += info[k].item()
             accum["obs_aux_loss"] += obs_aux_loss_val
 
-            prev_state = RSSMState(
+            prev_state = type(post)(
                 *[x.detach() for x in post],
             )
             prev_action = (
@@ -475,7 +481,7 @@ class DeepAIFAgent:
                 )
                 post, _ = wm.rssm.obs_step(state, prev_act, embed)
                 latents.append(post.mean.cpu())
-                state = RSSMState(*[x.detach() for x in post])
+                state = type(post)(*[x.detach() for x in post])
                 prev_act = actions[:, t].to(self._device)
 
             count += B * T

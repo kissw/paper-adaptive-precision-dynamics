@@ -8,12 +8,12 @@ Test 10 verifies RSSM regression (default config still selects RSSM).
 import torch
 import pytest
 from active_inference.config import Config
-from active_inference.models.rssm import RSSMState
 from active_inference.models.token_vit import (
     TokenViTEncoder,
     TokenViTTransition,
     TokenImageDecoder,
     TokenStateDecoder,
+    TokenRSSMState,
 )
 from active_inference.training.losses import compute_vfe
 
@@ -67,10 +67,12 @@ def test_encoder_shape():
 def test_initial_state_shapes():
     tr = _transition()
     s = tr.initial(B, device=torch.device("cpu"))
-    assert s.deter.shape == (B, N * D),   f"deter: {s.deter.shape}"
-    assert s.stoch.shape == (B, N * Z),   f"stoch: {s.stoch.shape}"
-    assert s.mean.shape  == (B, Z),       f"mean:  {s.mean.shape}"
-    assert s.std.shape   == (B, Z),       f"std:   {s.std.shape}"
+    assert s.deter.shape == (B, N, D),   f"deter: {s.deter.shape}"
+    assert s.stoch.shape == (B, N, Z),   f"stoch: {s.stoch.shape}"
+    assert s.mean.shape  == (B, Z),      f"mean:  {s.mean.shape}"
+    assert s.std.shape   == (B, Z),      f"std:   {s.std.shape}"
+    assert s.token_mean.shape == (B, N, Z), f"token_mean: {s.token_mean.shape}"
+    assert s.token_std.shape  == (B, N, Z), f"token_std:  {s.token_std.shape}"
 
 
 # ---------------------------------------------------------------------------
@@ -82,11 +84,13 @@ def test_img_step_shape():
     s0 = tr.initial(B, device=torch.device("cpu"))
     action = torch.randn(B, 2)
     prior = tr.img_step(s0, action)
-    assert prior.deter.shape == (B, N * D)
-    assert prior.stoch.shape == (B, N * Z)
+    assert prior.deter.shape == (B, N, D)
+    assert prior.stoch.shape == (B, N, Z)
     assert prior.mean.shape  == (B, Z)
     assert prior.std.shape   == (B, Z)
-    # std must be strictly positive
+    assert prior.token_mean.shape == (B, N, Z)
+    assert prior.token_std.shape  == (B, N, Z)
+    # pooled std must be strictly positive
     assert (prior.std > 0).all()
 
 
@@ -104,10 +108,12 @@ def test_obs_step_shape():
     obs_tokens = enc(img, state)              # (B, N, D)
     post, prior = tr.obs_step(s0, action, obs_tokens)
     for state_obj, label in [(post, "post"), (prior, "prior")]:
-        assert state_obj.deter.shape == (B, N * D), f"{label}.deter"
-        assert state_obj.stoch.shape == (B, N * Z), f"{label}.stoch"
-        assert state_obj.mean.shape  == (B, Z),     f"{label}.mean"
-        assert state_obj.std.shape   == (B, Z),     f"{label}.std"
+        assert state_obj.deter.shape == (B, N, D), f"{label}.deter"
+        assert state_obj.stoch.shape == (B, N, Z), f"{label}.stoch"
+        assert state_obj.mean.shape  == (B, Z),    f"{label}.mean"
+        assert state_obj.std.shape   == (B, Z),    f"{label}.std"
+        assert state_obj.token_mean.shape == (B, N, Z), f"{label}.token_mean"
+        assert state_obj.token_std.shape  == (B, N, Z), f"{label}.token_std"
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +128,8 @@ def test_imagine_shape():
     traj = tr.imagine(s0, actions)
     assert len(traj) == H
     for t, s in enumerate(traj):
-        assert s.deter.shape == (B, N * D), f"step {t} deter"
-        assert s.stoch.shape == (B, N * Z), f"step {t} stoch"
+        assert s.deter.shape == (B, N, D), f"step {t} deter"
+        assert s.stoch.shape == (B, N, Z), f"step {t} stoch"
 
 
 # ---------------------------------------------------------------------------
@@ -138,15 +144,20 @@ def test_get_feat_shape():
 
 
 # ---------------------------------------------------------------------------
-# Test 7: TokenImageDecoder output shape
+# Test 7: TokenImageDecoder output shape (3D inputs + decode_from_feat)
 # ---------------------------------------------------------------------------
 
 def test_image_decoder_shape():
     dec = _image_decoder()
-    deter_flat = torch.randn(B, N * D)
-    stoch_flat = torch.randn(B, N * Z)
-    img = dec(deter_flat, stoch_flat)
+    deter = torch.randn(B, N, D)
+    stoch = torch.randn(B, N, Z)
+    img = dec(deter, stoch)
     assert img.shape == (B, 3, 64, 64), f"decoder: {img.shape}"
+
+    # decode_from_feat accepts pooled (B, 320) feature
+    feat = torch.randn(B, D + Z)  # 320
+    img2 = dec.decode_from_feat(feat)
+    assert img2.shape == (B, 3, 64, 64), f"decode_from_feat: {img2.shape}"
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +172,7 @@ def test_state_decoder_shape():
 
 
 # ---------------------------------------------------------------------------
-# Test 9: VFE loss compatible with (B, Z) pooled mean/std; backward works
+# Test 9: VFE loss compatible with (B,N,Z) token_mean/std; backward works
 # ---------------------------------------------------------------------------
 
 def test_loss_backward():
@@ -179,13 +190,14 @@ def test_loss_backward():
     post, prior = tr.obs_step(s0, action, obs_tokens)
 
     feat = tr.get_feat(post)
-    recon_img = img_dec(post.deter, post.stoch)
+    recon_img = img_dec(post.deter, post.stoch)   # 3D deter/stoch
     recon_state = st_dec(feat)
 
-    # compute_vfe receives (B, Z) pooled mean/std — same shape as RSSM.
+    # compute_vfe with token-level (B,N,Z) mean/std.
+    # .sum(-1).mean() in losses.py handles any prefix dims before the Z dim.
     loss, info = compute_vfe(
-        post.mean, post.std,
-        prior.mean, prior.std,
+        post.token_mean, post.token_std,
+        prior.token_mean, prior.token_std,
         obs_img, recon_img,
         obs_state, recon_state,
         free_nats=1.0, kl_dyn_scale=1.0, kl_rep_scale=0.5,
@@ -272,22 +284,24 @@ def test_agent_update_token_vit():
 
 
 # ---------------------------------------------------------------------------
-# Test 10e: iCEM planner runs without error (expand compatibility)
+# Test 10e: iCEM expand compatibility with 3D token state fields
 # ---------------------------------------------------------------------------
 
 def test_icem_expand_compatibility():
-    """Confirm iCEM's state.expand(n_samples, -1) works for 2D token state."""
+    """Confirm iCEM's x.expand(n_samples, *x.shape[1:]) works for 3D token state."""
     tr = _transition()
     s0 = tr.initial(1, device=torch.device("cpu"))
-    # Simulate what iCEM does: expand initial state to n_samples.
     n_samples = 10
-    expanded = RSSMState(*[x.expand(n_samples, -1) for x in s0])
-    assert expanded.deter.shape == (n_samples, N * D)
-    assert expanded.stoch.shape == (n_samples, N * Z)
-    assert expanded.mean.shape  == (n_samples, Z)
-    assert expanded.std.shape   == (n_samples, Z)
+    # Generic expand: works for any tensor rank (2D for mean/std, 3D for deter/stoch/token_*).
+    expanded = TokenRSSMState(*[x.expand(n_samples, *x.shape[1:]) for x in s0])
+    assert expanded.deter.shape      == (n_samples, N, D)
+    assert expanded.stoch.shape      == (n_samples, N, Z)
+    assert expanded.mean.shape       == (n_samples, Z)       # pooled 2D
+    assert expanded.std.shape        == (n_samples, Z)       # pooled 2D
+    assert expanded.token_mean.shape == (n_samples, N, Z)
+    assert expanded.token_std.shape  == (n_samples, N, Z)
     # Then imagine runs correctly on expanded state.
     actions = torch.randn(3, n_samples, 2)
     traj = tr.imagine(expanded, actions)
     assert len(traj) == 3
-    assert traj[0].deter.shape == (n_samples, N * D)
+    assert traj[0].deter.shape == (n_samples, N, D)
