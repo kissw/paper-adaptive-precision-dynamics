@@ -31,6 +31,7 @@ videos/
 runs/
 wandb/
 *.log
+logs/
 
 # OS
 .DS_Store
