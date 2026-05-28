@@ -3,6 +3,12 @@
 Shared Token GMM: fits two PreferenceModels on flattened token features
 (M, token_dim) where M = B * N, capturing per-token distribution.
 
+Two modes:
+  shared   — raw token features, no position correction
+  pos_norm — position-normalised features:
+               mu_pos, std_pos computed from clean tokens only;
+               same stats applied to both clean and obstacle tokens before GMM
+
 Contrastive score per token:
     score(z_n) = log p_clean(z_n) - contrast_scale * log p_avoid(z_n)
 
@@ -53,6 +59,47 @@ def extract_token_features(state, feature_type: str = "deter_stoch") -> Tensor:
             f"Unknown feature_type: {feature_type!r}. "
             "Valid choices: deter_stoch, deter_token_mean, token_mean"
         )
+
+
+# ---------------------------------------------------------------------------
+# Position normalization
+# ---------------------------------------------------------------------------
+
+def compute_position_stats(
+    clean_tokens: Tensor,
+    eps: float = 1e-6,
+) -> tuple[Tensor, Tensor]:
+    """Compute per-position mean and std from clean token frames.
+
+    Args:
+        clean_tokens: (N_frames, N_tokens, token_dim)
+        eps: minimum std after clamping
+
+    Returns:
+        mu_pos:  (N_tokens, token_dim) — mean over frames
+        std_pos: (N_tokens, token_dim) — std over frames, clamped >= eps
+    """
+    mu_pos  = clean_tokens.mean(dim=0)               # (N, D)
+    std_pos = clean_tokens.std(dim=0).clamp(min=eps)  # (N, D)
+    return mu_pos, std_pos
+
+
+def apply_position_normalization(
+    tokens: Tensor,
+    mu_pos: Tensor,
+    std_pos: Tensor,
+) -> Tensor:
+    """Normalise tokens per spatial position.
+
+    Args:
+        tokens:  (N_frames, N_tokens, token_dim)
+        mu_pos:  (N_tokens, token_dim)
+        std_pos: (N_tokens, token_dim)
+
+    Returns:
+        (N_frames, N_tokens, token_dim)  zero-mean unit-std per position.
+    """
+    return (tokens - mu_pos.unsqueeze(0)) / std_pos.unsqueeze(0)
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,8 @@ from active_inference.training.token_preference import (
     TokenContrastivePreference,
     extract_token_features,
     topk_mean_token_score,
+    compute_position_stats,
+    apply_position_normalization,
 )
 
 
@@ -232,3 +234,178 @@ def test_existing_pooled_key_preserved(tmp_path):
     assert "token_contrastive_preference" in loaded, "token key missing"
     # Values in pooled key unchanged
     assert loaded["contrastive_preference"]["clean_means"].shape == (5, 64)
+
+
+# ---------------------------------------------------------------------------
+# Test 6: compute_position_stats
+# ---------------------------------------------------------------------------
+
+def test_compute_position_stats_shape():
+    """Output shapes are (N_tokens, token_dim) for both mu and std."""
+    torch.manual_seed(0)
+    F, N, D = 100, 64, 320
+    tokens = torch.randn(F, N, D)
+    mu_pos, std_pos = compute_position_stats(tokens, eps=1e-6)
+    assert mu_pos.shape  == (N, D), f"mu_pos shape wrong: {mu_pos.shape}"
+    assert std_pos.shape == (N, D), f"std_pos shape wrong: {std_pos.shape}"
+
+
+def test_compute_position_stats_std_positive():
+    """std_pos must be strictly positive (clamped to eps)."""
+    torch.manual_seed(1)
+    F, N, D = 50, 64, 320
+    tokens = torch.randn(F, N, D)
+    _, std_pos = compute_position_stats(tokens, eps=1e-6)
+    assert (std_pos > 0).all(), "std_pos contains non-positive values"
+
+
+def test_compute_position_stats_std_clamped_constant_input():
+    """Constant token (std=0 before clamping) must yield std >= eps."""
+    eps = 1e-4
+    F, N, D = 10, 4, 8
+    tokens = torch.ones(F, N, D)  # all identical -> raw std == 0
+    _, std_pos = compute_position_stats(tokens, eps=eps)
+    assert (std_pos >= eps).all(), f"clamping failed: min std = {std_pos.min().item()}"
+
+
+# ---------------------------------------------------------------------------
+# Test 7: apply_position_normalization
+# ---------------------------------------------------------------------------
+
+def test_apply_position_normalization_shape():
+    """Output shape matches input shape."""
+    F, N, D = 80, 64, 320
+    tokens  = torch.randn(F, N, D)
+    mu_pos  = tokens.mean(dim=0)
+    std_pos = tokens.std(dim=0).clamp(min=1e-6)
+    out = apply_position_normalization(tokens, mu_pos, std_pos)
+    assert out.shape == (F, N, D)
+
+
+def test_apply_position_normalization_zero_mean_unit_std():
+    """After normalization, per-position mean ≈ 0 and std ≈ 1."""
+    torch.manual_seed(2)
+    F, N, D = 200, 16, 32
+    # Give each position a distinct offset so position bias is non-trivial
+    offset = torch.arange(N, dtype=torch.float32).unsqueeze(-1) * 2.0  # (N, 1)
+    tokens = torch.randn(F, N, D) + offset.unsqueeze(0)
+
+    mu_pos, std_pos = compute_position_stats(tokens, eps=1e-6)
+    normed = apply_position_normalization(tokens, mu_pos, std_pos)
+
+    # Per-position mean should be ≈ 0
+    pos_mean = normed.mean(dim=0)   # (N, D)
+    assert pos_mean.abs().max().item() < 1e-4, (
+        f"mean not ≈ 0 after normalisation: max abs = {pos_mean.abs().max().item():.6f}"
+    )
+    # Per-position std should be ≈ 1
+    pos_std = normed.std(dim=0)     # (N, D)
+    assert (pos_std - 1.0).abs().max().item() < 5e-3, (
+        f"std not ≈ 1 after normalisation: max dev = {(pos_std-1).abs().max().item():.6f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 8: pos_norm GMM on synthetic position-biased data
+# ---------------------------------------------------------------------------
+
+def test_pos_norm_token_gmm_separates_position_biased_data():
+    """
+    Clean and obstacle tokens have the same class offset but different position
+    biases. After position normalization, the GMM must still achieve positive gap
+    (class separation survives; position bias is removed, not class signal).
+    """
+    torch.manual_seed(3)
+    F_c, F_a, N, D = 80, 80, 8, 4
+
+    # Position bias added to both — must be removed by pos_norm
+    pos_bias = torch.arange(N, dtype=torch.float32).unsqueeze(-1) * 3.0  # (N, 1)
+
+    # Class offsets: clean near +1, avoid near -1 in dim 0
+    clean_tokens = torch.randn(F_c, N, D) * 0.3 + pos_bias.unsqueeze(0)
+    clean_tokens[:, :, 0] += 1.0
+
+    avoid_tokens = torch.randn(F_a, N, D) * 0.3 + pos_bias.unsqueeze(0)
+    avoid_tokens[:, :, 0] -= 1.0
+
+    # Compute position stats from clean only (as in the script)
+    mu_pos, std_pos = compute_position_stats(clean_tokens, eps=1e-6)
+    clean_norm = apply_position_normalization(clean_tokens, mu_pos, std_pos)
+    avoid_norm = apply_position_normalization(avoid_tokens, mu_pos, std_pos)
+
+    # Flatten and fit GMM on normalised features
+    clean_flat = clean_norm.reshape(-1, D)
+    avoid_flat = avoid_norm.reshape(-1, D)
+
+    model = TokenContrastivePreference(K_clean=2, K_avoid=2, token_dim=D, min_std=0.01)
+    model.fit(clean_flat, avoid_flat, n_iters=200, lr=0.01)
+
+    with torch.no_grad():
+        c_score = model.log_prob_flat(clean_flat).mean().item()
+        a_score = model.log_prob_flat(avoid_flat).mean().item()
+        gap = c_score - a_score
+
+    assert gap > 0, (
+        f"pos_norm GMM gap not positive: clean={c_score:.3f}  avoid={a_score:.3f}  gap={gap:.3f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9: checkpoint structure — pos_norm and shared modes
+# ---------------------------------------------------------------------------
+
+def test_checkpoint_pos_norm_has_position_stats(tmp_path):
+    """pos_norm checkpoint must contain position_stats with mu_pos and std_pos."""
+    N, D = 8, 4
+    mu_pos  = torch.zeros(N, D)
+    std_pos = torch.ones(N, D)
+
+    tcp = {
+        "type":         "shared_token_gmm",
+        "mode":         "pos_norm",
+        "feature_type": "deter_stoch",
+        "token_dim":    D,
+        "num_tokens":   N,
+        "K_clean":      2,
+        "K_avoid":      2,
+        "topk_default": 4,
+        "topk_candidates": [1, 4, 8, 16],
+        "position_stats": {
+            "mu_pos":  mu_pos,
+            "std_pos": std_pos,
+            "eps":     1e-6,
+        },
+        "diagnostics": {},
+    }
+    path = tmp_path / "pos_norm.pt"
+    torch.save({"token_contrastive_preference": tcp}, path)
+    loaded = torch.load(path, weights_only=False)["token_contrastive_preference"]
+
+    assert loaded["mode"] == "pos_norm"
+    assert "position_stats" in loaded, "position_stats missing for pos_norm"
+    ps = loaded["position_stats"]
+    assert "mu_pos"  in ps and "std_pos" in ps and "eps" in ps
+    assert ps["mu_pos"].shape  == (N, D)
+    assert ps["std_pos"].shape == (N, D)
+
+
+def test_checkpoint_shared_has_no_position_stats(tmp_path):
+    """shared checkpoint must NOT contain position_stats."""
+    tcp = {
+        "type":         "shared_token_gmm",
+        "mode":         "shared",
+        "feature_type": "deter_stoch",
+        "token_dim":    4,
+        "num_tokens":   8,
+        "K_clean":      2,
+        "K_avoid":      2,
+        "topk_default": 4,
+        "topk_candidates": [1, 4, 8, 16],
+        "diagnostics": {},
+    }
+    path = tmp_path / "shared.pt"
+    torch.save({"token_contrastive_preference": tcp}, path)
+    loaded = torch.load(path, weights_only=False)["token_contrastive_preference"]
+
+    assert loaded["mode"] == "shared"
+    assert "position_stats" not in loaded, "position_stats must be absent for shared mode"
