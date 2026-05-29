@@ -152,6 +152,9 @@ def log_prob_posterior_under_mixture(
     proto_mean: Tensor,
     proto_log_std: Tensor,
     proto_logits: Tensor,
+    q_std_scale: float = 1.0,
+    proto_std_scale: float = 1.0,
+    min_var: float = 1e-12,
 ) -> Tensor:
     """Compute E_q[log p_mix(z)] using the q-integrated density approximation.
 
@@ -160,48 +163,53 @@ def log_prob_posterior_under_mixture(
 
         log p(q) = logsumexp_k( log_weight_k + log N(q_mean; mu_k, eff_std_k) )
 
-    where eff_std_k = sqrt(sigma_k^2 + q_std^2).
+    Scaled variant:
+        effective_var = (proto_std_scale * proto_std)^2 + (q_std_scale * q_std)^2
+
+    q_std_scale=1.0, proto_std_scale=1.0 reproduces the original formula.
+    q_std_scale=0.0 ignores posterior uncertainty (approaches mean_only).
+    proto_std_scale<1.0 sharpens the prototype mixture.
 
     Args:
-        q_mean        : (B, N, Z)
-        q_std         : (B, N, Z)
-        proto_mean    : (N, K, Z)
-        proto_log_std : (N, K, Z)
-        proto_logits  : (N, K)
+        q_mean          : (B, N, Z)
+        q_std           : (B, N, Z)
+        proto_mean      : (N, K, Z)
+        proto_log_std   : (N, K, Z)
+        proto_logits    : (N, K)
+        q_std_scale     : scale applied to q_std before squaring (default 1.0)
+        proto_std_scale : scale applied to proto_std before squaring (default 1.0)
+        min_var         : minimum effective variance after clamping
 
     Returns:
         log_prob : (B, N)
     """
-    B, N, Z = q_mean.shape
-    K = proto_mean.shape[1]
-
     # Broadcast: q_mean/q_std (B,N,1,Z), proto (1,N,K,Z)
-    qm  = q_mean.unsqueeze(2)                    # (B, N, 1, Z)
-    qs  = q_std.unsqueeze(2)                     # (B, N, 1, Z)
-    pm  = proto_mean.unsqueeze(0)                # (1, N, K, Z)
-    pls = proto_log_std.unsqueeze(0)             # (1, N, K, Z)
+    qm  = q_mean.unsqueeze(2)                       # (B, N, 1, Z)
+    qs  = q_std.unsqueeze(2)                        # (B, N, 1, Z)
+    pm  = proto_mean.unsqueeze(0)                   # (1, N, K, Z)
+    pls = proto_log_std.unsqueeze(0)                # (1, N, K, Z)
 
-    proto_var   = (2 * pls).exp()                # (1, N, K, Z)  sigma_k^2
-    eff_var     = proto_var + qs ** 2            # (B, N, K, Z)  sigma_k^2 + q_std^2
-    eff_std     = eff_var.sqrt()                 # (B, N, K, Z)
+    proto_var   = (2 * pls).exp()                   # (1, N, K, Z)  sigma_k^2
+    eff_var     = (
+        (proto_std_scale ** 2) * proto_var
+        + (q_std_scale ** 2) * qs ** 2
+    ).clamp(min=min_var)                            # (B, N, K, Z)
+    eff_std     = eff_var.sqrt()                    # (B, N, K, Z)
 
     # log N(q_mean; proto_mean, eff_std)
-    diff        = qm - pm                       # (B, N, K, Z)
+    diff        = qm - pm                          # (B, N, K, Z)
     log_gauss   = (
         -0.5 * math.log(2 * math.pi)
         - eff_std.log()
         - 0.5 * (diff / eff_std) ** 2
-    ).sum(-1)                                    # (B, N, K)
+    ).sum(-1)                                       # (B, N, K)
 
     # Normalise logits to log-weights
     log_weights = proto_logits.unsqueeze(0) - torch.logsumexp(
         proto_logits, dim=-1, keepdim=True,
-    ).unsqueeze(0)                               # (1, N, K)
+    ).unsqueeze(0)                                  # (1, N, K)
 
-    log_prob = torch.logsumexp(
-        log_weights + log_gauss, dim=-1,
-    )                                            # (B, N)
-    return log_prob
+    return torch.logsumexp(log_weights + log_gauss, dim=-1)   # (B, N)
 
 
 def log_prob_mean_only(
@@ -209,29 +217,38 @@ def log_prob_mean_only(
     proto_mean: Tensor,
     proto_log_std: Tensor,
     proto_logits: Tensor,
+    proto_std_scale: float = 1.0,
+    min_var: float = 1e-12,
 ) -> Tensor:
     """Ablation: evaluate mixture at q_mean only (ignores q_std).
 
+    proto_std_scale controls prototype sharpness; q_std is ignored.
+
     Args:
-        q_mean        : (B, N, Z)
-        proto_mean    : (N, K, Z)
-        proto_log_std : (N, K, Z)
-        proto_logits  : (N, K)
+        q_mean          : (B, N, Z)
+        proto_mean      : (N, K, Z)
+        proto_log_std   : (N, K, Z)
+        proto_logits    : (N, K)
+        proto_std_scale : scale applied to proto_std (default 1.0)
+        min_var         : minimum variance after clamping
 
     Returns:
         log_prob : (B, N)
     """
-    B, N, Z = q_mean.shape
-
     qm  = q_mean.unsqueeze(2)            # (B, N, 1, Z)
     pm  = proto_mean.unsqueeze(0)        # (1, N, K, Z)
     pls = proto_log_std.unsqueeze(0)     # (1, N, K, Z)
 
+    # Scaled proto variance
+    proto_var = (2 * pls).exp()          # (1, N, K, Z)
+    scaled_var = ((proto_std_scale ** 2) * proto_var).clamp(min=min_var)
+    scaled_std = scaled_var.sqrt()       # (1, N, K, Z)
+
     diff      = qm - pm                  # (B, N, K, Z)
     log_gauss = (
         -0.5 * math.log(2 * math.pi)
-        - pls
-        - 0.5 * (diff / pls.exp()) ** 2
+        - scaled_std.log()
+        - 0.5 * (diff / scaled_std) ** 2
     ).sum(-1)                            # (B, N, K)
 
     log_weights = proto_logits.unsqueeze(0) - torch.logsumexp(
@@ -280,6 +297,8 @@ class TokenVampPriorPreference:
         score_mode: str = "q_integrated",
         topk_default: int = 4,
         topk_candidates: list[int] | None = None,
+        q_std_scale: float = 1.0,
+        proto_std_scale: float = 1.0,
     ):
         self.clean_mean    = proto_mean_clean
         self.clean_log_std = proto_log_std_clean
@@ -291,6 +310,8 @@ class TokenVampPriorPreference:
         self.score_mode        = score_mode
         self.topk_default      = topk_default
         self.topk_candidates   = topk_candidates or [1, 4, 8, 16]
+        self.q_std_scale       = q_std_scale
+        self.proto_std_scale   = proto_std_scale
 
     def to(self, device):
         self.clean_mean    = self.clean_mean.to(device)
@@ -305,15 +326,23 @@ class TokenVampPriorPreference:
         if self.score_mode == "q_integrated":
             return log_prob_posterior_under_mixture(
                 q_mean, q_std, self.clean_mean, self.clean_log_std, self.clean_logits,
+                q_std_scale=self.q_std_scale, proto_std_scale=self.proto_std_scale,
             )
-        return log_prob_mean_only(q_mean, self.clean_mean, self.clean_log_std, self.clean_logits)
+        return log_prob_mean_only(
+            q_mean, self.clean_mean, self.clean_log_std, self.clean_logits,
+            proto_std_scale=self.proto_std_scale,
+        )
 
     def _log_prob_avoid(self, q_mean: Tensor, q_std: Tensor) -> Tensor:
         if self.score_mode == "q_integrated":
             return log_prob_posterior_under_mixture(
                 q_mean, q_std, self.avoid_mean, self.avoid_log_std, self.avoid_logits,
+                q_std_scale=self.q_std_scale, proto_std_scale=self.proto_std_scale,
             )
-        return log_prob_mean_only(q_mean, self.avoid_mean, self.avoid_log_std, self.avoid_logits)
+        return log_prob_mean_only(
+            q_mean, self.avoid_mean, self.avoid_log_std, self.avoid_logits,
+            proto_std_scale=self.proto_std_scale,
+        )
 
     def token_scores(self, q_mean: Tensor, q_std: Tensor) -> Tensor:
         """Contrastive score per token.
@@ -367,6 +396,8 @@ class TokenVampPriorPreference:
             "score_mode":      self.score_mode,
             "topk_default":    self.topk_default,
             "topk_candidates": self.topk_candidates,
+            "q_std_scale":     self.q_std_scale,
+            "proto_std_scale": self.proto_std_scale,
         }
 
     @classmethod
@@ -382,4 +413,6 @@ class TokenVampPriorPreference:
             score_mode=sd.get("score_mode", "q_integrated"),
             topk_default=sd.get("topk_default", 4),
             topk_candidates=sd.get("topk_candidates", [1, 4, 8, 16]),
+            q_std_scale=sd.get("q_std_scale", 1.0),
+            proto_std_scale=sd.get("proto_std_scale", 1.0),
         )

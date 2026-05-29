@@ -376,3 +376,187 @@ def test_state_dict_roundtrip():
     assert restored.score_mode     == model.score_mode
     assert restored.topk_default   == model.topk_default
     assert restored.contrast_scale == model.contrast_scale
+
+
+# ---------------------------------------------------------------------------
+# Test 9: q_std_scale / proto_std_scale — scale parameter tests
+# ---------------------------------------------------------------------------
+
+def _proto_fixture(N: int = 4, K: int = 2, Z: int = 4):
+    """Return a simple proto tuple (proto_mean, proto_log_std, proto_logits)."""
+    pm  = torch.zeros(N, K, Z)
+    pm[:, 0, 0] = 2.0   # component 0 at +2 in dim 0
+    pls = torch.full((N, K, Z), -1.0)  # std ≈ 0.37
+    pl  = torch.zeros(N, K)
+    return pm, pls, pl
+
+
+def test_default_scales_preserve_behavior():
+    """q_std_scale=1.0, proto_std_scale=1.0 must match original formula."""
+    torch.manual_seed(5)
+    B, N, K, Z = 2, 4, 2, 4
+    q_mean = torch.randn(B, N, Z)
+    q_std  = torch.rand(B, N, Z).abs() + 0.1
+    pm, pls, pl = _proto_fixture(N, K, Z)
+
+    from active_inference.training.token_vampprior_preference import (
+        log_prob_posterior_under_mixture,
+    )
+
+    out_default = log_prob_posterior_under_mixture(
+        q_mean, q_std, pm, pls, pl,
+        q_std_scale=1.0, proto_std_scale=1.0,
+    )
+    # Compute manually: eff_var = exp(2*pls) + q_std^2
+    qm = q_mean.unsqueeze(2)
+    qs = q_std.unsqueeze(2)
+    import math
+    proto_var = (2 * pls.unsqueeze(0)).exp()
+    eff_var   = proto_var + qs ** 2
+    eff_std   = eff_var.sqrt()
+    diff      = qm - pm.unsqueeze(0)
+    log_g = (-0.5 * math.log(2 * math.pi) - eff_std.log()
+             - 0.5 * (diff / eff_std) ** 2).sum(-1)
+    log_w = pl.unsqueeze(0) - torch.logsumexp(pl, dim=-1, keepdim=True).unsqueeze(0)
+    out_manual = torch.logsumexp(log_w + log_g, dim=-1)
+
+    assert torch.allclose(out_default, out_manual, atol=1e-5), (
+        f"default scale output doesn't match manual: "
+        f"max diff={( out_default - out_manual).abs().max().item():.2e}"
+    )
+
+
+def test_q_std_scale_zero_reduces_uncertainty():
+    """With large q_std, q_std_scale=0.0 should differ from q_std_scale=1.0."""
+    torch.manual_seed(6)
+    B, N, K, Z = 2, 4, 2, 4
+    q_mean = torch.randn(B, N, Z)
+    q_std  = torch.ones(B, N, Z) * 5.0   # deliberately large
+    pm, pls, pl = _proto_fixture(N, K, Z)
+
+    from active_inference.training.token_vampprior_preference import (
+        log_prob_posterior_under_mixture,
+    )
+
+    lp_scale1 = log_prob_posterior_under_mixture(
+        q_mean, q_std, pm, pls, pl, q_std_scale=1.0,
+    )
+    lp_scale0 = log_prob_posterior_under_mixture(
+        q_mean, q_std, pm, pls, pl, q_std_scale=0.0,
+    )
+    assert not torch.allclose(lp_scale1, lp_scale0, atol=1e-3), (
+        "q_std_scale=0.0 should produce different result than q_std_scale=1.0 "
+        "when q_std is large"
+    )
+
+
+def test_proto_std_scale_affects_log_prob():
+    """proto_std_scale=0.5 must produce different result than proto_std_scale=1.0."""
+    torch.manual_seed(7)
+    B, N, K, Z = 2, 4, 2, 4
+    q_mean = torch.randn(B, N, Z)
+    q_std  = torch.ones(B, N, Z) * 0.1
+    pm, pls, pl = _proto_fixture(N, K, Z)
+
+    from active_inference.training.token_vampprior_preference import (
+        log_prob_posterior_under_mixture,
+    )
+
+    lp_proto1   = log_prob_posterior_under_mixture(
+        q_mean, q_std, pm, pls, pl, proto_std_scale=1.0,
+    )
+    lp_proto_half = log_prob_posterior_under_mixture(
+        q_mean, q_std, pm, pls, pl, proto_std_scale=0.5,
+    )
+    assert not torch.allclose(lp_proto1, lp_proto_half, atol=1e-3), (
+        "proto_std_scale=0.5 should produce different result than proto_std_scale=1.0"
+    )
+
+
+def test_mean_only_proto_std_scale_affects():
+    """In mean_only mode, proto_std_scale should still affect log_prob."""
+    torch.manual_seed(8)
+    B, N, K, Z = 2, 4, 2, 4
+    q_mean = torch.randn(B, N, Z)
+    pm, pls, pl = _proto_fixture(N, K, Z)
+
+    from active_inference.training.token_vampprior_preference import log_prob_mean_only
+
+    lp_scale1 = log_prob_mean_only(q_mean, pm, pls, pl, proto_std_scale=1.0)
+    lp_scale_half = log_prob_mean_only(q_mean, pm, pls, pl, proto_std_scale=0.5)
+    assert not torch.allclose(lp_scale1, lp_scale_half, atol=1e-3), (
+        "proto_std_scale should affect log_prob_mean_only"
+    )
+
+
+def test_state_dict_saves_scales():
+    """state_dict must contain q_std_scale and proto_std_scale."""
+    N, K, Z = 4, 2, 4
+    model = _small_model(N=N, K=K, Z=Z)
+    # Override with non-default values
+    model.q_std_scale     = 0.25
+    model.proto_std_scale = 0.5
+
+    sd = model.state_dict()
+    assert "q_std_scale"     in sd, "q_std_scale missing from state_dict"
+    assert "proto_std_scale" in sd, "proto_std_scale missing from state_dict"
+    assert sd["q_std_scale"]     == 0.25
+    assert sd["proto_std_scale"] == 0.5
+
+
+def test_from_state_dict_restores_scales():
+    """from_state_dict must restore q_std_scale and proto_std_scale."""
+    N, K, Z = 4, 2, 4
+    model = _small_model(N=N, K=K, Z=Z)
+    model.q_std_scale     = 0.25
+    model.proto_std_scale = 0.5
+
+    restored = TokenVampPriorPreference.from_state_dict(model.state_dict())
+    assert restored.q_std_scale     == 0.25
+    assert restored.proto_std_scale == 0.5
+
+
+def test_from_state_dict_defaults_for_old_checkpoint():
+    """Loading a checkpoint without scale fields should default to 1.0 (backward compat)."""
+    N, K, Z = 4, 2, 4
+    model = _small_model(N=N, K=K, Z=Z)
+    sd = model.state_dict()
+    sd.pop("q_std_scale",     None)
+    sd.pop("proto_std_scale", None)
+
+    restored = TokenVampPriorPreference.from_state_dict(sd)
+    assert restored.q_std_scale     == 1.0, "missing q_std_scale should default to 1.0"
+    assert restored.proto_std_scale == 1.0, "missing proto_std_scale should default to 1.0"
+
+
+def test_checkpoint_save_contains_scales(tmp_path):
+    """Saved checkpoint dict should contain q_std_scale and proto_std_scale."""
+    N, K_c, K_a, Z = 4, 2, 3, 4
+    tvp = {
+        "type":            "position_conditioned_token_posterior_mixture",
+        "method":          "vampprior_like",
+        "score_mode":      "q_integrated",
+        "latent_dim":      Z,
+        "num_tokens":      N,
+        "K_clean":         K_c,
+        "K_avoid":         K_a,
+        "contrast_scale":  1.0,
+        "min_std":         0.01,
+        "q_std_scale":     0.25,
+        "proto_std_scale": 0.5,
+        "clean_mean":    torch.randn(N, K_c, Z),
+        "clean_log_std": torch.zeros(N, K_c, Z),
+        "clean_logits":  torch.zeros(N, K_c),
+        "avoid_mean":    torch.randn(N, K_a, Z),
+        "avoid_log_std": torch.zeros(N, K_a, Z),
+        "avoid_logits":  torch.zeros(N, K_a),
+        "topk_default":  4,
+        "topk_candidates": [1, 4, 8, 16],
+        "diagnostics":   {},
+    }
+    path = tmp_path / "tvp_scale.pt"
+    torch.save({"token_vampprior_preference": tvp}, path)
+    loaded = torch.load(path, weights_only=False)["token_vampprior_preference"]
+
+    assert loaded["q_std_scale"]     == 0.25
+    assert loaded["proto_std_scale"] == 0.5

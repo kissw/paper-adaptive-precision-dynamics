@@ -144,6 +144,18 @@ def main():
              "mean_only: evaluate at q_mean point estimate (ablation).",
     )
 
+    # Precision scaling
+    parser.add_argument(
+        "--q_std_scale", type=float, default=1.0,
+        help="Scale applied to q_std before squaring in effective_var. "
+             "1.0=standard q_integrated; 0.0=ignore posterior uncertainty.",
+    )
+    parser.add_argument(
+        "--proto_std_scale", type=float, default=1.0,
+        help="Scale applied to proto_std before squaring in effective_var. "
+             "<1.0 sharpens the prototype mixture; >1.0 smooths it.",
+    )
+
     args = parser.parse_args()
     torch.manual_seed(args.seed)
 
@@ -169,6 +181,8 @@ def main():
 
     print(f"  world_model_type : {agent.world_model._wm_type}")
     print(f"  score_mode       : {args.score_mode}")
+    print(f"  q_std_scale      : {args.q_std_scale}")
+    print(f"  proto_std_scale  : {args.proto_std_scale}")
     print(f"  latent_dim (Z)   : {Z}")
     print(f"  num_tokens (N)   : {N}")
     print(f"  K_clean / K_avoid: {args.K_clean} / {args.K_avoid}")
@@ -223,6 +237,8 @@ def main():
         score_mode=args.score_mode,
         topk_default=args.topk_default,
         topk_candidates=sorted(set(args.topk)),
+        q_std_scale=args.q_std_scale,
+        proto_std_scale=args.proto_std_scale,
     )
 
     # ----- Diagnostics (per-token) -----
@@ -287,6 +303,8 @@ def main():
         "K_avoid":         args.K_avoid,
         "contrast_scale":  args.contrast_scale,
         "min_std":         args.min_std,
+        "q_std_scale":     args.q_std_scale,
+        "proto_std_scale": args.proto_std_scale,
         # per-position prototype tensors
         "clean_mean":      clean_pm.cpu(),
         "clean_log_std":   clean_pls.cpu(),
