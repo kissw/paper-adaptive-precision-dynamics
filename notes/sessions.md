@@ -312,3 +312,80 @@ CUDA_VISIBLE_DEVICES=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 ### 다음 단계 (미완)
 - RSSM과 TokenViT 재학습 (corrected preprocessing target으로)
 - 재학습 후 compare_rssm_token_vit_rollout 재실행으로 공정한 비교
+
+---
+
+## 2026-05-30 (6차)
+
+### 작업 범위
+`scripts/train.py` checkpoint에 metadata 추가.
+
+### 완료된 작업
+
+1. **`scripts/train.py`** 수정 — 커밋 `3aad724`
+
+   신규 helper 함수 3개:
+   - `_safe_config_to_dict(cfg)`: `dataclasses.asdict(cfg)` 기반, 실패 시 `{}` fallback
+   - `_get_git_info()`: `git rev-parse` 호출, 실패 시 `(None, None)` 반환
+   - `build_checkpoint(agent, cfg, args, epoch, global_step, train_loss, best_epoch, best_loss, checkpoint_type, is_best)`: 기존 key + metadata 포함 dict 반환
+
+   저장 변경:
+   - `best.pt`: `build_checkpoint(..., checkpoint_type="best", is_best=True)`
+   - `epoch_N.pt`: `build_checkpoint(..., checkpoint_type="epoch")`
+   - `final.pt`: `build_checkpoint(..., checkpoint_type="final", is_best=False)`
+   - `crash_epoch_*.pt`: 기존 `agent.save_checkpoint()` 유지 (lightweight)
+
+   `best_epoch` 변수 추가로 best 갱신 시점 epoch 추적.
+   `epoch_losses`, `mean_loss` loop 전에 초기화 (edge case 방어).
+
+2. **metadata keys 목록**:
+   | key | 설명 |
+   |-----|------|
+   | `epoch` | 저장 시점 epoch |
+   | `global_step` | 누적 update step 수 |
+   | `best_epoch` | best 갱신된 epoch |
+   | `best_metric` / `best_loss` | best loss 값 (동일) |
+   | `train_loss` | 해당 epoch mean loss |
+   | `config` | Config dataclass → plain dict (JSON-serialisable) |
+   | `world_model_type` | `cfg.model.world_model_type` |
+   | `crop_road` | `cfg.encoder.crop_road` |
+   | `image_size` | `cfg.encoder.image_size` |
+   | `data_path` | CLI `args.data` |
+   | `output_dir` | CLI `args.output_dir` |
+   | `checkpoint_type` | `"best"`, `"epoch"`, `"final"` |
+   | `is_best` | bool |
+   | `timestamp` | ISO 8601 |
+   | `git_commit` | short hash |
+   | `git_branch` | branch name |
+
+3. **`tests/test_checkpoint_metadata.py`** 신규 — 20/20 통과
+
+4. **전체 test suite**: 157/158 (CARLA env 제외)
+
+### 설계 결정
+- 기존 key (`world_model`, `optimizer`, `preference`) 위치/구조 완전 유지
+- metadata는 top-level에 추가 key로만 삽입 → downstream scripts 호환
+- `crash_epoch_*.pt`는 CUDA 오류 복구 path이므로 lightweight `agent.save_checkpoint` 유지
+- `config` snapshot은 JSON-serialisable plain dict (OmegaConf-free)
+
+### 수동 확인 명령 (재학습 후)
+```bash
+~/.local/bin/uv run python - <<'PY'
+import torch, glob
+paths = sorted(glob.glob("runs/*cropfix*/checkpoints/*.pt"))
+if not paths:
+    print("No cropfix checkpoints found yet.")
+for p in paths:
+    ckpt = torch.load(p, map_location="cpu", weights_only=False)
+    print("=" * 100)
+    print(p)
+    for k in ["epoch","global_step","best_epoch","best_loss","train_loss",
+              "checkpoint_type","is_best","world_model_type","crop_road",
+              "image_size","git_branch","git_commit","timestamp"]:
+        print(k, "=", ckpt.get(k, None))
+PY
+```
+
+### 다음 단계 (미완)
+- RSSM과 TokenViT 재학습 (corrected preprocessing + metadata checkpoint으로)
+- 재학습 후 compare_rssm_token_vit_rollout 재실행으로 공정한 비교
