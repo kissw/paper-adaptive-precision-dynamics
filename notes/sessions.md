@@ -236,3 +236,79 @@ RSSM 설정 (task_b_v5.yaml)과 TokenViT 설정 (token_vit.yaml) 모두 `encoder
 ### 다음 단계 (미완)
 - 더 많은 case (--num_cases)로 전체 dataset rollout 품질 분석
 - EFE/evaluate.py에 token preference 연결 여부 판단
+
+---
+
+## 2026-05-30 (5차)
+
+### 작업 범위
+WorldModel-level image preprocessing 일관성 수정 (encoder/target mismatch 버그 픽스).
+
+### 발견된 버그
+- `ConvEncoder.forward()`에만 `crop_road`가 적용되고, reconstruction target은 full image → encoder input과 decoder target이 다른 image space
+- TokenViT encoder는 `_crop_road` 파라미터 자체가 없어서 `cfg.encoder.crop_road: true`가 사실상 무시됨
+- preference fitting, rollout visualization, visual surprise 모두 raw full image를 기준으로 계산
+
+### 완료된 작업
+
+1. **`src/active_inference/agent.py`** 수정 — 커밋 `cfd790e`
+   - `self._crop_road` 저장, `ConvEncoder`에 `crop_road=False` 전달 (double crop 방지)
+   - `WorldModel.preprocess_image(img)` 신규
+   - `WorldModel.encode_obs(img, state)` 신규 — 외부 호출용 진입점
+   - `update()`: `img_t = preprocess_image(img_raw_t)`, VFE target을 `img_t`로 수정
+   - `step_with_info()`: `img_model` 기준 visual surprise & `ref_image`
+   - `encode_preference_data()`: `encode_obs()` 사용
+
+2. **스크립트 전체 `.encoder(` → `.encode_obs(` 교체**
+   - `fit_contrastive_preference.py`, `fit_token_contrastive_preference.py`, `fit_token_vampprior_preference.py`, `analyze_5d_results.py`, `refit_preference.py`, `diagnose_state_decoder.py`
+
+3. **`compare_rssm_token_vit_rollout.py`** 리팩터
+   - 이전 crop 관련 헬퍼 (`get_crop_road_from_config`, `apply_crop_road`, `prepare_gt_images`) 제거
+   - `preprocess_for_display(wm, img_chw, device)` 신규 (`wm.preprocess_image` 기반)
+   - `rollout_model`: `encode_obs` 사용
+   - `make_grid`: 단일 GT 5행으로 단순화, `gt_label` 파라미터 추가
+   - `run_case`: RSSM preprocess_for_display GT 기준 단일 메트릭
+   - `main`: `--crop_road` 인자 제거, `wm._crop_road` 자동 읽기, 불일치 warning
+
+4. **`tests/test_image_preprocessing_consistency.py`** 신규 — 6/6 통과
+
+5. **전체 test suite**: 137/138 (CARLA env 제외)
+
+6. **검증 결과**
+   - `wm._crop_road=True`, `wm.encoder._crop_road=False` ✓
+   - `preprocess_image` = manual `crop_road()` (diff = 0.00e+00) ✓
+   - 기존 checkpoint: MSE(recon, full)=0.0065 < MSE(recon, crop)=0.0261 (기존 버그로 학습된 결과, 예상됨)
+
+### 설계 결정
+- `preprocess_image()`가 모든 image preprocessing의 단일 진입점
+- `encode_obs(img, state)` = external API, raw image → preprocess → encode
+- `encoder(img, state)` = internal only (preprocessed image 받는 것을 암묵적으로 가정)
+- `token_vit.yaml`: 이미 `crop_road: true` 존재 — 별도 config 생성 불필요
+
+### 수동 실행 커맨드 (학습 실행 금지 — 참고용)
+
+RSSM 64x64 corrected training:
+```bash
+RUN=runs/rssm_64_cropfix_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$RUN"
+CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    ~/.local/bin/uv run python -u scripts/train.py \
+    --config configs/experiment/task_b_v5.yaml \
+    --data data/expert_data_mixed.h5 \
+    --output_dir "$RUN" 2>&1 | tee "$RUN/train.log"
+```
+
+TokenViT 64x64 corrected training:
+```bash
+RUN=runs/token_vit_64_cropfix_$(date +%Y%m%d_%H%M%S)
+mkdir -p "$RUN"
+CUDA_VISIBLE_DEVICES=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    ~/.local/bin/uv run python -u scripts/train.py \
+    --config configs/experiment/token_vit.yaml \
+    --data data/expert_data_mixed.h5 \
+    --output_dir "$RUN" 2>&1 | tee "$RUN/train.log"
+```
+
+### 다음 단계 (미완)
+- RSSM과 TokenViT 재학습 (corrected preprocessing target으로)
+- 재학습 후 compare_rssm_token_vit_rollout 재실행으로 공정한 비교
