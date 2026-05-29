@@ -1,5 +1,8 @@
 import argparse
+import dataclasses
+import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -11,6 +14,91 @@ from active_inference.agent import DeepAIFAgent
 from active_inference.data.dataset import get_dataloader, get_preference_dataloader
 from active_inference.data.synthetic import SyntheticDrivingData
 from active_inference.utils.seed import set_seed
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint helpers
+# ---------------------------------------------------------------------------
+
+def _safe_config_to_dict(cfg) -> dict:
+    """Recursively convert Config dataclass to a plain serialisable dict."""
+    try:
+        return dataclasses.asdict(cfg)
+    except Exception:
+        return {}
+
+
+def _get_git_info() -> tuple[str | None, str | None]:
+    """Return (commit_hash, branch_name) from git, or (None, None) on failure."""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        return commit, branch
+    except Exception:
+        return None, None
+
+
+def build_checkpoint(
+    agent: DeepAIFAgent,
+    cfg: Config,
+    args,
+    epoch: int,
+    global_step: int | None,
+    train_loss: float | None,
+    best_epoch: int | None,
+    best_loss: float | None,
+    checkpoint_type: str,
+    is_best: bool,
+) -> dict:
+    """Build a checkpoint dict with metadata.
+
+    Preserves the existing top-level keys (world_model, optimizer, preference)
+    so that all downstream scripts (fit_*_preference, compare_rollout) continue
+    to work unchanged.
+    """
+    git_commit, git_branch = _get_git_info()
+
+    pref = agent.preference
+    try:
+        pref_dict = {
+            "means":     pref.means.data,
+            "log_stds":  pref.log_stds.data,
+            "logits":    pref.logits.data,
+        }
+    except AttributeError:
+        pref_dict = {}
+
+    return {
+        # ---- existing keys (unchanged) ----
+        "world_model": agent.world_model.state_dict(),
+        "optimizer":   agent._optimizer.state_dict(),
+        "preference":  pref_dict,
+
+        # ---- metadata ----
+        "epoch":            int(epoch),
+        "global_step":      int(global_step) if global_step is not None else None,
+        "best_epoch":       int(best_epoch)  if best_epoch  is not None else None,
+        "best_metric":      float(best_loss) if best_loss   is not None else None,
+        "best_loss":        float(best_loss) if best_loss   is not None else None,
+        "train_loss":       float(train_loss) if train_loss is not None else None,
+        "config":           _safe_config_to_dict(cfg),
+        "world_model_type": getattr(getattr(cfg, "model", None), "world_model_type", None),
+        "crop_road":        getattr(getattr(cfg, "encoder", None), "crop_road", None),
+        "image_size":       getattr(getattr(cfg, "encoder", None), "image_size", None),
+        "data_path":        getattr(args, "data", None),
+        "output_dir":       getattr(args, "output_dir", None),
+        "checkpoint_type":  checkpoint_type,
+        "is_best":          bool(is_best),
+        "timestamp":        datetime.now().isoformat(timespec="seconds"),
+        "git_commit":       git_commit,
+        "git_branch":       git_branch,
+    }
 
 
 def main():
@@ -71,6 +159,9 @@ def main():
 
     global_step = start_epoch * len(dataloader)
     best_loss = float("inf")
+    best_epoch: int | None = None
+    epoch_losses: list[float] = []
+    mean_loss: float = 0.0
 
     for epoch in range(start_epoch, cfg.training.epochs):
         epoch_losses = []
@@ -112,8 +203,33 @@ def main():
 
         if mean_loss < best_loss:
             best_loss = mean_loss
-            agent.save_checkpoint(str(ckpt_dir / "best.pt"))
-        agent.save_checkpoint(str(ckpt_dir / f"epoch_{epoch + 1}.pt"))
+            best_epoch = epoch + 1
+            torch.save(
+                build_checkpoint(
+                    agent, cfg, args,
+                    epoch=epoch + 1,
+                    global_step=global_step,
+                    train_loss=mean_loss,
+                    best_epoch=best_epoch,
+                    best_loss=best_loss,
+                    checkpoint_type="best",
+                    is_best=True,
+                ),
+                str(ckpt_dir / "best.pt"),
+            )
+        torch.save(
+            build_checkpoint(
+                agent, cfg, args,
+                epoch=epoch + 1,
+                global_step=global_step,
+                train_loss=mean_loss,
+                best_epoch=best_epoch,
+                best_loss=best_loss,
+                checkpoint_type="epoch",
+                is_best=(mean_loss == best_loss),
+            ),
+            str(ckpt_dir / f"epoch_{epoch + 1}.pt"),
+        )
 
         # --- GMM preference update ---
         pref_cfg = cfg.preference
@@ -145,7 +261,19 @@ def main():
             else:
                 print("  No valid preference sequences found (need success_flags in HDF5)")
 
-    agent.save_checkpoint(str(ckpt_dir / "final.pt"))
+    torch.save(
+        build_checkpoint(
+            agent, cfg, args,
+            epoch=cfg.training.epochs,
+            global_step=global_step,
+            train_loss=mean_loss if epoch_losses else None,
+            best_epoch=best_epoch,
+            best_loss=best_loss if best_loss < float("inf") else None,
+            checkpoint_type="final",
+            is_best=False,
+        ),
+        str(ckpt_dir / "final.pt"),
+    )
     writer.close()
     print(f"Training complete. Checkpoints in {ckpt_dir}")
 
