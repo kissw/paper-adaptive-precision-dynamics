@@ -85,13 +85,13 @@ def analyze_state_decoder_quality(checkpoint_path: Path, data_path: Path):
             for i in range(min(500, len(images))):
                 img = torch.tensor(images[i], dtype=torch.float32).unsqueeze(0).to(device)
                 st = torch.tensor(states[i], dtype=torch.float32).unsqueeze(0).to(device)
-                embed = wm.encoder(img, st)
+                embed = wm.encode_obs(img, st)
                 post, _ = wm.rssm.obs_step(state, prev_act, embed)
                 feat = wm.rssm.get_feat(post)
                 decoded = wm.state_decoder(feat)
                 pred_obs_dists.append(decoded[0, 4].item())
                 from active_inference.models.rssm import RSSMState
-                state = RSSMState(*[x.detach() for x in post])
+                state = type(post)(*[x.detach() for x in post])
                 prev_act = torch.tensor(actions[i], dtype=torch.float32).unsqueeze(0).to(device)
 
         pred = np.array(pred_obs_dists)

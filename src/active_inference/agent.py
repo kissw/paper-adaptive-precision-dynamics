@@ -15,6 +15,7 @@ from active_inference.planning.cem_planner import iCEMPlanner, PlanResult
 from active_inference.planning.efe import EFEScorer
 from active_inference.training.losses import compute_vfe
 from active_inference.training.preference import PreferenceModel
+from active_inference.utils.transforms import crop_road as _crop_road
 
 
 class WorldModel(nn.Module):
@@ -22,13 +23,16 @@ class WorldModel(nn.Module):
         super().__init__()
         wm_type = getattr(getattr(cfg, "model", None), "world_model_type", "rssm")
         self._wm_type = wm_type
+        # Centralised preprocessing flag: crop happens in preprocess_image(),
+        # not inside encoder, to ensure encoder input == reconstruction target.
+        self._crop_road = getattr(cfg.encoder, "crop_road", False)
 
         if wm_type == "rssm":
             self.encoder = ConvEncoder(
                 image_channels=cfg.encoder.image_channels,
                 state_dim=cfg.encoder.state_dim,
                 embed_dim=cfg.rssm.embed_dim,
-                crop_road=getattr(cfg.encoder, "crop_road", False),
+                crop_road=False,  # disabled: WorldModel.preprocess_image handles it
             )
             feat_dim = cfg.rssm.deter_dim + cfg.rssm.stoch_dim
             self.obs_decoder = ObsDecoder(feat_dim=feat_dim, image_channels=cfg.encoder.image_channels)
@@ -117,6 +121,16 @@ class WorldModel(nn.Module):
             return state.token_mean, state.token_std  # (B, N, Z)
         return state.mean, state.std                  # (B, Z)
 
+    def preprocess_image(self, img: "torch.Tensor") -> "torch.Tensor":
+        """Return the model-space image (crop_road applied if configured)."""
+        if self._crop_road:
+            return _crop_road(img)
+        return img
+
+    def encode_obs(self, img: "torch.Tensor", state: "torch.Tensor") -> "torch.Tensor":
+        """Preprocess raw image then run encoder. Use instead of encoder() directly."""
+        return self.encoder(self.preprocess_image(img), state)
+
 
 class DeepAIFAgent:
     def __init__(self, cfg: Config):
@@ -186,7 +200,8 @@ class DeepAIFAgent:
             else obs_state.to(self._device)
         )
 
-        embed = self.world_model.encoder(img, st)
+        img_model = self.world_model.preprocess_image(img)
+        embed = self.world_model.encoder(img_model, st)
         post, _ = self.world_model.rssm.obs_step(
             self._prev_state, self._prev_action, embed,
         )
@@ -214,14 +229,13 @@ class DeepAIFAgent:
             self.efe_scorer._beta_s = self._cfg.efe.beta_state
             self.efe_scorer._beta_i = self._cfg.efe.beta_instrumental
 
-        # Visual surprise: compute reconstruction error on current
-        # observation. High error = unexpected visual (obstacle).
-        # Pass to EFE scorer so imagined trajectories that keep the
-        # obstacle in view are penalized.
+        # Visual surprise: compare decoded image against preprocessed model-space
+        # image (same space as decoder output). If crop_road=true, ref_image is
+        # road-cropped and resized, not the raw full frame.
         feat = self.world_model.rssm.get_feat(post)
         recon_img = self.world_model.decode_obs(post)
         recon_error = float(
-            (recon_img - img).pow(2).sum(dim=(1, 2, 3)).item()
+            (recon_img - img_model).pow(2).sum(dim=(1, 2, 3)).item()
         )
         efe_obs_decoder = (
             self.world_model.obs_decoder
@@ -230,7 +244,7 @@ class DeepAIFAgent:
         )
         visual_info = {
             "recon_error": recon_error,
-            "ref_image": img.detach(),
+            "ref_image": img_model.detach(),
             "obs_decoder": efe_obs_decoder,
         }
 
@@ -284,7 +298,8 @@ class DeepAIFAgent:
         )
 
         for t in range(T):
-            img_t = images[:, t].to(self._device)
+            img_raw_t = images[:, t].to(self._device)
+            img_t = wm.preprocess_image(img_raw_t)  # encoder input == recon target
             st_t = states[:, t].to(self._device)
             act_t = (
                 actions[:, t].to(self._device) if t > 0
@@ -308,7 +323,7 @@ class DeepAIFAgent:
                     post_std,
                     prior_mean,
                     prior_std,
-                    img_t,
+                    img_t,       # preprocessed image — same space as decoder output
                     recon_img,
                     st_t,
                     recon_state,
@@ -475,7 +490,7 @@ class DeepAIFAgent:
             prev_act = torch.zeros(B, self._cfg.cem.action_dim, device=self._device)
 
             for t in range(T):
-                embed = wm.encoder(
+                embed = wm.encode_obs(
                     images[:, t].to(self._device),
                     states[:, t].to(self._device),
                 )

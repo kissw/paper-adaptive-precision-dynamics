@@ -26,7 +26,7 @@ action = torch.zeros(1, 2, device=device)
 dummy_img = torch.zeros(1, 3, 64, 64, device=device)
 dummy_state = torch.tensor([[3.0, 0.0, 0.0, 0.0]], device=device)
 
-embed = wm.encoder(dummy_img, dummy_state)
+embed = wm.encode_obs(dummy_img, dummy_state)
 post, prior = wm.rssm.obs_step(state, action, embed)
 
 print("=== State decoder on posterior (observation-informed) ===")

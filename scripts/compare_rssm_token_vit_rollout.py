@@ -47,7 +47,6 @@ except ImportError:
 
 from active_inference.config import Config
 from active_inference.agent import WorldModel
-from active_inference.utils.transforms import crop_road as _crop_road_transform
 
 
 def ssim_fn(gt: np.ndarray, pred: np.ndarray, data_range: float = 1.0, channel_axis: int = 2) -> float:
@@ -58,18 +57,19 @@ def ssim_fn(gt: np.ndarray, pred: np.ndarray, data_range: float = 1.0, channel_a
 
 
 # ---------------------------------------------------------------------------
-# crop_road helpers
+# Preprocessing helper (uses WorldModel.preprocess_image for consistency)
 # ---------------------------------------------------------------------------
 
-def get_crop_road_from_config(cfg_path: str) -> bool:
-    """Return the encoder.crop_road flag from a YAML config (default False)."""
-    cfg = Config.from_yaml(cfg_path)
-    return bool(getattr(getattr(cfg, "encoder", None), "crop_road", False))
-
-
-def apply_crop_road(img: torch.Tensor) -> torch.Tensor:
-    """Apply crop_road transform to a (C,H,W) or (B,C,H,W) tensor."""
-    return _crop_road_transform(img)
+def preprocess_for_display(
+    wm: WorldModel,
+    img_chw: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return model-space image (C,H,W) on CPU — matches what encoder receives."""
+    with torch.no_grad():
+        x = img_chw.unsqueeze(0).to(device)
+        y = wm.preprocess_image(x)
+    return y.squeeze(0).cpu()
 
 
 # ---------------------------------------------------------------------------
@@ -131,24 +131,6 @@ def build_world_model(cfg_path: str, ckpt_path: str, device: torch.device) -> Wo
     return wm
 
 
-def prepare_gt_images(
-    images: torch.Tensor,
-    start: int,
-    context_len: int,
-    horizon: int,
-    crop_road: bool,
-) -> list[np.ndarray]:
-    """Return `horizon` GT display images, optionally crop_road-processed."""
-    gt_list = []
-    for h in range(horizon):
-        t = start + context_len + h
-        img = images[t]                               # (3, H, W)
-        if crop_road:
-            img = apply_crop_road(img)
-        gt_list.append(to_uint8(img))
-    return gt_list
-
-
 def rollout_model(
     wm: WorldModel,
     images: torch.Tensor,   # (T_total, 3, H, W)  float, on CPU
@@ -182,7 +164,7 @@ def rollout_model(
             t = start + i
             img = images[t : t + 1].to(device)
             st  = states[t : t + 1].to(device)
-            embed = wm.encoder(img, st)
+            embed = wm.encode_obs(img, st)
             post, _ = wm.rssm.obs_step(state, prev_act, embed)
             state = type(post)(*[x.detach() for x in post])
             # action at time t moves us to time t+1
@@ -210,24 +192,18 @@ def rollout_model(
 # ---------------------------------------------------------------------------
 
 def make_grid(
-    gt_rssm_imgs: list[np.ndarray],  # GT as seen by RSSM (crop_road if True)
+    gt_imgs: list[np.ndarray],   # preprocessed GT (model-space)
     rssm_imgs: list[np.ndarray],
     rssm_errs: list[np.ndarray],
-    gt_tvit_imgs: list[np.ndarray],  # GT as seen by TokenViT
     tvit_imgs: list[np.ndarray],
     tvit_errs: list[np.ndarray],
     title: str,
     error_scale: float,
     dpi: int = 120,
-    crop_road_rssm: bool = False,
-    crop_road_tvit: bool = False,
+    gt_label: str = "GT (preprocessed)",
 ) -> plt.Figure:
-    horizon = len(gt_rssm_imgs)
-
-    # Decide row count: add a "GT raw" row when crop_road is active on either model
-    show_raw_gt = crop_road_rssm or crop_road_tvit
-    n_rows = 6 if show_raw_gt else 5
-    n_cols = horizon
+    horizon = len(gt_imgs)
+    n_rows, n_cols = 5, horizon
 
     fw = max(n_cols * 1.2, 8)
     fh = n_rows * 1.4 + 1.2
@@ -236,32 +212,9 @@ def make_grid(
     if n_cols == 1:
         axes = axes.reshape(-1, 1)
 
-    if show_raw_gt:
-        rssm_gt_label = "GT (crop_road)" if crop_road_rssm else "GT (full)"
-        tvit_gt_label = "GT (crop_road)" if crop_road_tvit else "GT (full)"
-        row_labels = [
-            rssm_gt_label,
-            "RSSM rollout",
-            "RSSM L1 error",
-            tvit_gt_label,
-            "TokenViT rollout",
-            "TokenViT L1 error",
-        ]
-        row_data = [
-            gt_rssm_imgs, rssm_imgs, rssm_errs,
-            gt_tvit_imgs, tvit_imgs, tvit_errs,
-        ]
-        is_error = [False, False, True, False, False, True]
-    else:
-        row_labels = [
-            "GT future",
-            "RSSM rollout",
-            "RSSM L1 error",
-            "TokenViT rollout",
-            "TokenViT L1 error",
-        ]
-        row_data = [gt_rssm_imgs, rssm_imgs, rssm_errs, tvit_imgs, tvit_errs]
-        is_error = [False, False, True, False, True]
+    row_labels = [gt_label, "RSSM rollout", "RSSM L1 error", "TokenViT rollout", "TokenViT L1 error"]
+    row_data   = [gt_imgs, rssm_imgs, rssm_errs, tvit_imgs, tvit_errs]
+    is_error   = [False, False, True, False, True]
 
     for r in range(n_rows):
         for c in range(n_cols):
@@ -305,14 +258,20 @@ def run_case(
     error_scale: float,
     dpi: int,
     save_gif: bool,
-    crop_road_rssm: bool = False,
-    crop_road_tvit: bool = False,
 ) -> list[dict]:
-    """Run one comparison case. Returns list of metric dicts."""
+    """Run one comparison case. Returns list of metric dicts.
 
-    # ---- GT future (model-matched; crop_road applied per-model) ----
-    gt_rssm_list = prepare_gt_images(images, start, context_len, horizon, crop_road=crop_road_rssm)
-    gt_tvit_list = prepare_gt_images(images, start, context_len, horizon, crop_road=crop_road_tvit)
+    GT row and metrics use RSSM-preprocessed images (same model-space as RSSM
+    decoder output).  Both RSSM and TokenViT errors are measured against this
+    common reference so PSNR/SSIM are comparable.
+    """
+
+    # ---- GT future: RSSM model-space (preprocess_image applied) ----
+    gt_list = []
+    for h in range(horizon):
+        t = start + context_len + h
+        gt_model = preprocess_for_display(wm_rssm, images[t], device)
+        gt_list.append(to_uint8(gt_model))
 
     # ---- RSSM rollout ----
     t0 = time.time()
@@ -329,32 +288,29 @@ def run_case(
     print(f"  TokenViT rollout done in {time.time()-t0:.1f}s")
 
     # Log min/max for diagnostics
-    gt_t = images[start + context_len]
+    gt_t_model = preprocess_for_display(wm_rssm, images[start + context_len], device)
     rssm_t = rssm_preds[0]
     tvit_t = tvit_preds[0]
     print(f"  Image range diagnostic (step +1):")
-    print(f"    GT    min={gt_t.min():.3f} max={gt_t.max():.3f}")
-    print(f"    RSSM  min={rssm_t.min():.3f} max={rssm_t.max():.3f}")
-    print(f"    TVit  min={tvit_t.min():.3f} max={tvit_t.max():.3f}")
+    print(f"    GT (model)  min={gt_t_model.min():.3f} max={gt_t_model.max():.3f}")
+    print(f"    RSSM        min={rssm_t.min():.3f} max={rssm_t.max():.3f}")
+    print(f"    TVit        min={tvit_t.min():.3f} max={tvit_t.max():.3f}")
 
     # ---- Compute error maps and metrics ----
     rssm_imgs_u8, rssm_errs, tvit_imgs_u8, tvit_errs = [], [], [], []
     metrics_rows: list[dict] = []
 
     for h in range(horizon):
-        rssm_gt_u8 = gt_rssm_list[h]
-        tvit_gt_u8 = gt_tvit_list[h]
-        rssm_u8    = to_uint8(rssm_preds[h])
-        tvit_u8    = to_uint8(tvit_preds[h])
+        gt_u8   = gt_list[h]
+        rssm_u8 = to_uint8(rssm_preds[h])
+        tvit_u8 = to_uint8(tvit_preds[h])
 
-        rssm_gt_f = rssm_gt_u8.astype(np.float32) / 255.0
-        tvit_gt_f = tvit_gt_u8.astype(np.float32) / 255.0
-        rssm_f    = rssm_u8.astype(np.float32) / 255.0
-        tvit_f    = tvit_u8.astype(np.float32) / 255.0
+        gt_f    = gt_u8.astype(np.float32) / 255.0
+        rssm_f  = rssm_u8.astype(np.float32) / 255.0
+        tvit_f  = tvit_u8.astype(np.float32) / 255.0
 
-        # L1 error against model-matched GT
-        rssm_err = np.abs(rssm_gt_f - rssm_f).mean(axis=2)   # (H,W)
-        tvit_err = np.abs(tvit_gt_f - tvit_f).mean(axis=2)
+        rssm_err = np.abs(gt_f - rssm_f).mean(axis=2)
+        tvit_err = np.abs(gt_f - tvit_f).mean(axis=2)
 
         rssm_errs.append(np.clip(rssm_err * error_scale, 0.0, 1.0))
         tvit_errs.append(np.clip(tvit_err * error_scale, 0.0, 1.0))
@@ -362,9 +318,8 @@ def run_case(
         rssm_imgs_u8.append(rssm_u8)
         tvit_imgs_u8.append(tvit_u8)
 
-        # Metrics against model-matched GT
-        m_rssm = compute_metrics(rssm_gt_f, rssm_f)
-        m_tvit = compute_metrics(tvit_gt_f, tvit_f)
+        m_rssm = compute_metrics(gt_f, rssm_f)
+        m_tvit = compute_metrics(gt_f, tvit_f)
         metrics_rows.append({
             "case_name": case_name, "model": "RSSM", "horizon_step": h + 1,
             "mse": m_rssm["mse"], "psnr": m_rssm["psnr"], "ssim": m_rssm["ssim"],
@@ -375,20 +330,20 @@ def run_case(
         })
 
     # ---- Grid ----
+    rssm_crop = getattr(wm_rssm, "_crop_road", False)
+    gt_label = "GT (crop_road)" if rssm_crop else "GT (full)"
     title = (
         f"data={data_name}  start={start}  ctx={context_len}  H={horizon}\n"
         f"RSSM={rssm_ckpt_name}  TokenViT={tvit_ckpt_name}"
     )
     fig = make_grid(
-        gt_rssm_imgs=gt_rssm_list,
+        gt_imgs=gt_list,
         rssm_imgs=rssm_imgs_u8,
         rssm_errs=rssm_errs,
-        gt_tvit_imgs=gt_tvit_list,
         tvit_imgs=tvit_imgs_u8,
         tvit_errs=tvit_errs,
         title=title, error_scale=error_scale, dpi=dpi,
-        crop_road_rssm=crop_road_rssm,
-        crop_road_tvit=crop_road_tvit,
+        gt_label=gt_label,
     )
     grid_path = output_dir / f"{case_name}_grid.png"
     fig.savefig(grid_path, bbox_inches="tight")
@@ -448,9 +403,6 @@ def main():
     parser.add_argument("--device",               default="cuda")
     parser.add_argument("--dpi",                   type=int, default=120)
     parser.add_argument("--error_scale",           type=float, default=4.0)
-    # crop_road: force both models to use crop_road (otherwise auto-read from configs)
-    parser.add_argument("--crop_road",             action="store_true", default=False,
-                        help="Force crop_road for both models. Default: auto-read from each config.")
 
     args = parser.parse_args()
 
@@ -492,11 +444,16 @@ def main():
     print(f"\n  RSSM type     : {wm_rssm._wm_type}")
     print(f"  TokenViT type : {wm_tvit._wm_type}")
 
-    # ---- Resolve crop_road flags ----
-    crop_road_rssm = args.crop_road or get_crop_road_from_config(args.rssm_config)
-    crop_road_tvit = args.crop_road or get_crop_road_from_config(args.token_vit_config)
-    print(f"  crop_road RSSM    : {crop_road_rssm}")
-    print(f"  crop_road TokenViT: {crop_road_tvit}")
+    # ---- Check preprocessing consistency ----
+    rssm_crop = getattr(wm_rssm, "_crop_road", False)
+    tvit_crop = getattr(wm_tvit, "_crop_road", False)
+    print(f"  crop_road RSSM    : {rssm_crop}")
+    print(f"  crop_road TokenViT: {tvit_crop}")
+    if rssm_crop != tvit_crop:
+        print(
+            "WARNING: RSSM and TokenViT use different crop_road settings. "
+            "Metrics use RSSM preprocessing target by default."
+        )
 
     # ---- Multi-case loop ----
     all_metrics: list[dict] = []
@@ -534,8 +491,6 @@ def main():
             error_scale=args.error_scale,
             dpi=args.dpi,
             save_gif=args.save_gif,
-            crop_road_rssm=crop_road_rssm,
-            crop_road_tvit=crop_road_tvit,
         )
         all_metrics.extend(rows)
 

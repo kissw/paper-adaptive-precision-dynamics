@@ -161,7 +161,7 @@ def main():
             for idx in ep_indices:
                 img_t = torch.tensor(images[idx], dtype=torch.float32).unsqueeze(0).to(device)
                 st_t = torch.tensor(states[idx], dtype=torch.float32).unsqueeze(0).to(device)
-                embed = wm.encoder(img_t, st_t)
+                embed = wm.encode_obs(img_t, st_t)
                 post, _ = wm.rssm.obs_step(state, prev_act, embed)
 
                 # Only keep this latent if it passes the speed filter
@@ -171,7 +171,7 @@ def main():
                     if count >= args.max_samples:
                         break
 
-                state = RSSMState(*[x.detach() for x in post])
+                state = type(post)(*[x.detach() for x in post])
                 prev_act = torch.tensor(actions[idx], dtype=torch.float32).unsqueeze(0).to(device)
 
             if count % 500 == 0:

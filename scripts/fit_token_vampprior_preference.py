@@ -84,7 +84,7 @@ def encode_token_posteriors(
         for i in range(len(images)):
             img   = images[i : i + 1].to(dev)
             st    = states[i : i + 1].to(dev)
-            embed = wm.encoder(img, st)
+            embed = wm.encode_obs(img, st)
             post, _ = wm.rssm.obs_step(state, prev_act, embed)
 
             mu, std = extract_token_posterior_stats(post)  # each (1, N, Z)

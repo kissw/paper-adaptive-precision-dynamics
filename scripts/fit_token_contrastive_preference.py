@@ -87,7 +87,7 @@ def encode_token_latents(
         for i in range(len(images)):
             img   = images[i : i + 1].to(dev)
             st    = states[i : i + 1].to(dev)
-            embed = wm.encoder(img, st)
+            embed = wm.encode_obs(img, st)
             post, _ = wm.rssm.obs_step(state, prev_act, embed)
 
             tok = extract_token_features(post, feature_type)  # (1, N, D)

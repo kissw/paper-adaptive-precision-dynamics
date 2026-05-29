@@ -46,10 +46,10 @@ def encode_latents(agent, data_path, max_samples=5000):
         for i in range(min(len(images), max_samples)):
             img = images[i : i + 1].to(dev)
             st = states[i : i + 1].to(dev)
-            embed = wm.encoder(img, st)
+            embed = wm.encode_obs(img, st)
             post, _ = wm.rssm.obs_step(state, prev_act, embed)
             latents.append(post.mean.cpu())
-            state = RSSMState(*[x.detach() for x in post])
+            state = type(post)(*[x.detach() for x in post])
 
     return torch.cat(latents).to(dev)
 
