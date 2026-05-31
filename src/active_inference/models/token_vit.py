@@ -115,6 +115,58 @@ class TokenViTEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# ActionWarpHead  (NEW)
+# ---------------------------------------------------------------------------
+
+class ActionWarpHead(nn.Module):
+    """Per-token 2D displacement field from action + token context, applied
+    via grid_sample. Forces action to act as an explicit geometric transform
+    on the token grid so it cannot be ignored during imagination.
+
+    delta = global(action)            # depth-free, rotation/heading-like
+          + residual(token_ctx, act)  # per-token, parallax-like
+    """
+
+    def __init__(self, num_tokens: int, deter_dim: int, action_dim: int,
+                 max_disp: float = 0.5):
+        super().__init__()
+        self._G = int(num_tokens ** 0.5)
+        assert self._G * self._G == num_tokens, "tokens must form a square grid"
+        self._max_disp = max_disp
+        self._global_flow = nn.Sequential(
+            nn.Linear(action_dim, deter_dim), nn.SiLU(),
+            nn.Linear(deter_dim, 2),
+        )
+        self._act_proj = nn.Linear(action_dim, deter_dim)
+        self._resid_flow = nn.Sequential(
+            nn.Linear(deter_dim * 2, deter_dim), nn.SiLU(),
+            nn.Linear(deter_dim, 2),
+        )
+        ys, xs = torch.meshgrid(
+            torch.linspace(-1, 1, self._G),
+            torch.linspace(-1, 1, self._G), indexing="ij",
+        )
+        self.register_buffer("_base", torch.stack([xs, ys], dim=-1).unsqueeze(0))
+
+    def forward(self, x: Tensor, action: Tensor) -> tuple[Tensor, Tensor]:
+        # x: (B, N, D)   action: (B, A)
+        B, N, D = x.shape
+        G = self._G
+        g = torch.tanh(self._global_flow(action)) * self._max_disp     # (B,2)
+        g = g.view(B, 1, 1, 2).expand(B, G, G, 2)
+        act_e = self._act_proj(action).unsqueeze(1).expand(B, N, D)     # (B,N,D)
+        r = self._resid_flow(torch.cat([x, act_e], dim=-1))            # (B,N,2)
+        r = torch.tanh(r).view(B, G, G, 2) * (self._max_disp * 0.5)
+        delta = g + r                                                   # (B,G,G,2)
+        sample = self._base + delta
+        grid = x.transpose(1, 2).reshape(B, D, G, G)                    # (B,D,G,G)
+        warped = F.grid_sample(grid, sample, mode="bilinear",
+                               padding_mode="border", align_corners=True)
+        warped = warped.reshape(B, D, N).transpose(1, 2)               # (B,N,D)
+        return warped, delta.reshape(B, N, 2)
+
+
+# ---------------------------------------------------------------------------
 # TokenViTTransition
 # ---------------------------------------------------------------------------
 
@@ -179,6 +231,13 @@ class TokenViTTransition(nn.Module):
 
         # Prior stochastic head: outputs token-level mean and raw std.
         self._prior_head = nn.Linear(deter_dim, stoch_dim * 2)
+
+        # NEW: action-conditioned warp head
+        self._warp_head = ActionWarpHead(
+            num_tokens=num_tokens, deter_dim=deter_dim,
+            action_dim=action_dim, max_disp=0.5,
+        )
+        self._last_delta = None
 
         # Posterior fusion: fuse prior_deter tokens with obs_tokens.
         self._obs_fuse = nn.Linear(deter_dim + embed_dim, deter_dim)
@@ -279,11 +338,18 @@ class TokenViTTransition(nn.Module):
         )                                                          # (B, N, D)
         x = x + self._pos_embed                                    # (B, N, D)
 
-        # Broadcast action embedding to every token.
+        # NEW: action-conditioned geometric warp BEFORE transformer.
+        # Moves token content per the action so action is an explicit
+        # geometric transform (cannot be ignored during imagination).
+        warped, delta = self._warp_head(x, prev_action)            # (B,N,D),(B,N,2)
+        self._last_delta = delta
+        x = warped
+
+        # Residual semantic action conditioning (kept).
         act_emb = self._action_mlp(prev_action)                    # (B, D)
         x = x + act_emb.unsqueeze(1)                               # (B, N, D)
 
-        # Prior transformer: new deterministic context.
+        # Prior transformer REFINES the warped grid (disocclusion/dynamics).
         new_deter = self._prior_transformer(x)                     # (B, N, D)
 
         # Stochastic prior head.
