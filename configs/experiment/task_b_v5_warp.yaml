@@ -13,6 +13,9 @@
 seed: 42
 device: cuda
 
+model:
+  world_model_type: token_vit
+
 training:
   batch_size: 64
   beta_warp_smooth: 0.01
@@ -24,6 +27,23 @@ encoder:
   image_size: 64
   state_dim: 4
   crop_road: true
+
+token_vit:
+  image_size: 64
+  patch_size: 8
+  num_tokens: 64
+  embed_dim: 256
+  deter_dim: 256
+  stoch_dim: 64
+  feat_dim: 320
+  num_layers: 4
+  num_prior_layers: 2
+  num_post_layers: 2
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+  min_std: 0.1
+  action_dim: 2
 
 rssm:
   deter_dim: 256
