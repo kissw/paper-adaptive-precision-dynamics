@@ -142,6 +142,12 @@ class ActionWarpHead(nn.Module):
             nn.Linear(deter_dim * 2, deter_dim), nn.SiLU(),
             nn.Linear(deter_dim, 2),
         )
+        # Identity initialization: initial delta ≈ 0
+        nn.init.zeros_(self._global_flow[-1].weight)
+        nn.init.zeros_(self._global_flow[-1].bias)
+        nn.init.zeros_(self._resid_flow[-1].weight)
+        nn.init.zeros_(self._resid_flow[-1].bias)
+        
         ys, xs = torch.meshgrid(
             torch.linspace(-1, 1, self._G),
             torch.linspace(-1, 1, self._G), indexing="ij",

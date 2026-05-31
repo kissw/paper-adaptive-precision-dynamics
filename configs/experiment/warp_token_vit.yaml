@@ -1,0 +1,103 @@
+# Token-level ViT world model — Option C baseline (64x64 data).
+#
+# Selects TokenViTTransition + TokenViTEncoder instead of RSSM + ConvEncoder.
+# All planning, EFE, and GMM code paths remain unchanged; the world model
+# exposes the same RSSM-compatible interface.
+#
+# Key differences from default.yaml:
+# - model.world_model_type: token_vit
+# - token_vit: full architecture parameters
+# - encoder.state_dim: 4  (same as default)
+# - rssm fields retained for ensemble/preference instantiation fallbacks
+
+seed: 42
+device: cuda
+
+model:
+  world_model_type: token_vit
+
+encoder:
+  image_channels: 3
+  image_size: 64
+  state_dim: 4
+  crop_road: true
+
+token_vit:
+  image_size: 64
+  patch_size: 8
+  num_tokens: 64
+  embed_dim: 256
+  deter_dim: 256
+  stoch_dim: 64
+  feat_dim: 320
+  num_layers: 4
+  num_prior_layers: 2
+  num_post_layers: 2
+  num_heads: 8
+  mlp_ratio: 4.0
+  dropout: 0.0
+  min_std: 0.1
+  action_dim: 2
+
+# Keep rssm block so preference/ensemble fall back to correct stoch_dim.
+rssm:
+  deter_dim: 256
+  stoch_dim: 64
+  embed_dim: 256
+  min_std: 0.1
+
+ensemble:
+  num_heads: 5
+  hidden_dim: 256
+
+cem:
+  horizon: 12
+  n_samples: 500
+  n_elites: 50
+  n_iters: 5
+  colored_noise_beta: 1.0
+  warm_start: true
+  action_dim: 2
+  noise_scale: [0.8, 0.6]
+  accel_prior: 0.3
+  cold_start_extra_iters: 5
+  min_std: 0.1
+  keep_fraction: 0.2
+
+preference:
+  K: 5
+  min_std: 0.01
+  update_interval: 1
+  warmup_epoch: 10
+  fit_iters: 300
+  fit_lr: 0.005
+  max_samples: 5000
+
+efe:
+  beta_instrumental: 1.0
+  beta_epistemic: 0.1
+  beta_state: 0.5
+  mc_samples: 32
+  temporal_discount: 0.95
+
+training:
+  batch_size: 64
+  beta_warp_smooth: 0.01
+  beta_contrastive: 0.1
+  contrastive_k: 4
+  epochs: 50
+  seq_len: 50
+  lr: 1.0e-4
+  grad_clip: 100.0
+  kl_dyn_scale: 1.0
+  kl_rep_scale: 0.5
+  free_nats: 1.0
+
+evaluation:
+  episodes: 5
+  max_frames: 1000
+  epistemic_anneal: 0.1
+  towns:
+    task_a: Town04
+    task_b: Town06_Opt
+    baseline: Town06
