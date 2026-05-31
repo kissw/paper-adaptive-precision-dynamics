@@ -52,3 +52,43 @@ def compute_vfe(
         "kl_rep": rep_loss,
         "kl_per_dim": kl_per_dim,
     }
+
+
+def warp_smoothness_loss(delta: Tensor, grid_side: int) -> Tensor:
+    """Total-variation penalty on a per-token 2D warp field.
+
+    delta: (B, N, 2) where N = grid_side**2. Reshapes to (B, G, G, 2) and
+    penalizes squared differences between spatially adjacent tokens so the
+    learned flow stays locally smooth (standard optical-flow regularizer).
+    """
+    B = delta.shape[0]
+    G = grid_side
+    d = delta.reshape(B, G, G, 2)
+    dx = (d[:, :, 1:, :] - d[:, :, :-1, :]).pow(2).mean()
+    dy = (d[:, 1:, :, :] - d[:, :-1, :, :]).pow(2).mean()
+    return dx + dy
+
+
+def action_contrastive_loss(
+    pred_feat: Tensor,
+    target_feat: Tensor,
+    cf_feats: Tensor,
+    temperature: float = 0.1,
+) -> Tensor:
+    """InfoNCE: real-action prediction should match the true next-state
+    feature and be distinguishable from counterfactual-action predictions.
+
+    pred_feat   : (B, F)     feat of img_step(prev_state, real_action)
+    target_feat : (B, F)     feat of the true next posterior (detached)
+    cf_feats    : (B, K, F)  feats of img_step under K shuffled actions
+    Returns scalar InfoNCE loss (lower = action better predicts its own future).
+    """
+    p = F.normalize(pred_feat, dim=-1)
+    t = F.normalize(target_feat.detach(), dim=-1)
+    cf = F.normalize(cf_feats, dim=-1)                       # (B,K,F)
+
+    pos = (p * t).sum(-1, keepdim=True)                      # (B,1)
+    neg = torch.bmm(cf, p.unsqueeze(-1)).squeeze(-1)         # (B,K)
+    logits = torch.cat([pos, neg], dim=1) / temperature      # (B,1+K)
+    labels = torch.zeros(p.shape[0], dtype=torch.long, device=p.device)
+    return F.cross_entropy(logits, labels)

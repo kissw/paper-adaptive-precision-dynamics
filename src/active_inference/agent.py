@@ -13,7 +13,11 @@ from active_inference.models.rssm import RSSM, RSSMState
 from active_inference.models.ensemble import EnsembleTransitionHeads
 from active_inference.planning.cem_planner import iCEMPlanner, PlanResult
 from active_inference.planning.efe import EFEScorer
-from active_inference.training.losses import compute_vfe
+from active_inference.training.losses import (
+    compute_vfe,
+    warp_smoothness_loss,
+    action_contrastive_loss,
+)
 from active_inference.training.preference import PreferenceModel
 from active_inference.utils.transforms import crop_road as _crop_road
 
@@ -284,12 +288,16 @@ class DeepAIFAgent:
         wm = self.world_model
         cfg = self._cfg.training
         beta_obstacle_aux = getattr(cfg, "beta_obstacle_aux", 0.0)
+        beta_warp_smooth = float(getattr(cfg, "beta_warp_smooth", 0.0))
+        beta_contrastive = float(getattr(cfg, "beta_contrastive", 0.0))
+        contrastive_k = int(getattr(cfg, "contrastive_k", 4))
 
         self._optimizer.zero_grad()
         total_loss_value = 0.0
         accum = {
             "img_loss": 0.0, "state_loss": 0.0,
             "kl_dyn": 0.0, "kl_rep": 0.0, "obs_aux_loss": 0.0,
+            "warp_smooth_loss": 0.0, "contrastive_loss": 0.0,
         }
 
         prev_state = wm.rssm.initial(B, self._device)
@@ -346,6 +354,44 @@ class DeepAIFAgent:
                     loss = loss + beta_obstacle_aux * obs_aux
                     obs_aux_loss_val = obs_aux.item()
 
+                # --- Warp regularization + counterfactual contrastive ---
+                warp_loss_val = 0.0
+                contrastive_loss_val = 0.0
+                rssm = wm.rssm
+                has_warp = hasattr(rssm, "_warp_head")
+
+                if has_warp and (beta_warp_smooth > 0 or beta_contrastive > 0):
+                    # Real-action one-step prior from the PREVIOUS posterior.
+                    # (prev_state, act_t) — same inputs obs_step used internally,
+                    # re-run img_step explicitly so we can read _last_delta and
+                    # build counterfactuals from the identical start state.
+                    real_prior = rssm.img_step(prev_state, act_t)
+                    delta = rssm._last_delta            # (B, N, 2)
+
+                    if beta_warp_smooth > 0 and delta is not None:
+                        G = int(delta.shape[1] ** 0.5)
+                        warp_loss = warp_smoothness_loss(delta, G)
+                        loss = loss + beta_warp_smooth * warp_loss
+                        warp_loss_val = warp_loss.item()
+
+                    if beta_contrastive > 0:
+                        pred_feat = rssm.get_feat(real_prior)       # (B,F)
+                        target_feat = rssm.get_feat(post)           # (B,F) true next
+                        # Counterfactual actions: roll the batch action tensor
+                        # so each sample is paired with OTHER samples' actions.
+                        cf_list = []
+                        Bsz = act_t.shape[0]
+                        for k in range(1, contrastive_k + 1):
+                            shifted = torch.roll(act_t, shifts=k, dims=0)
+                            cf_prior = rssm.img_step(prev_state, shifted)
+                            cf_list.append(rssm.get_feat(cf_prior))
+                        cf_feats = torch.stack(cf_list, dim=1)       # (B,K,F)
+                        c_loss = action_contrastive_loss(
+                            pred_feat, target_feat, cf_feats,
+                        )
+                        loss = loss + beta_contrastive * c_loss
+                        contrastive_loss_val = c_loss.item()
+
             # NaN guard: skip this timestep if loss is bad
             if torch.isnan(loss) or torch.isinf(loss):
                 prev_state = type(post)(
@@ -366,6 +412,8 @@ class DeepAIFAgent:
             for k in ["img_loss", "state_loss", "kl_dyn", "kl_rep"]:
                 accum[k] += info[k].item()
             accum["obs_aux_loss"] += obs_aux_loss_val
+            accum["warp_smooth_loss"] += warp_loss_val
+            accum["contrastive_loss"] += contrastive_loss_val
 
             prev_state = type(post)(
                 *[x.detach() for x in post],

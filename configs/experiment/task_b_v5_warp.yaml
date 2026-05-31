@@ -1,0 +1,69 @@
+# Task B v5 + Warp: Obstacle Avoidance with action-conditioned warp head
+#
+# Same as task_b_v5.yaml but enables the two warp-head training signals on
+# the TokenViTTransition world model:
+# - beta_warp_smooth: 0.01  (TV regularizer on per-token warp delta field)
+# - beta_contrastive: 0.1   (counterfactual InfoNCE action contrastive)
+# - contrastive_k: 4        (shuffled-action negatives per sample)
+#
+# Targets the posterior-prior epistemic gap: forces action to act as an
+# explicit geometric transform and pushes imagination to be action-sensitive
+# in the correct direction. Requires world_model_type: token_vit (warp head).
+
+seed: 42
+device: cuda
+
+training:
+  batch_size: 64
+  beta_warp_smooth: 0.01
+  beta_contrastive: 0.1
+  contrastive_k: 4
+
+encoder:
+  image_channels: 3
+  image_size: 64
+  state_dim: 4
+  crop_road: true
+
+rssm:
+  deter_dim: 256
+  stoch_dim: 64
+  embed_dim: 256
+  min_std: 0.1
+
+cem:
+  horizon: 15
+  n_samples: 500
+  n_elites: 50
+  n_iters: 5
+  colored_noise_beta: 1.0
+  warm_start: true
+  action_dim: 2
+  noise_scale: [1.0, 0.6]
+  accel_prior: 0.2
+  cold_start_extra_iters: 5
+  min_std: 0.1
+  keep_fraction: 0.2
+  warm_start_reset_threshold: 4.0
+
+preference:
+  K: 7
+  min_std: 0.01
+  update_interval: 1
+  warmup_epoch: 10
+  fit_iters: 300
+  fit_lr: 0.005
+  max_samples: 5000     #5000, 20000
+
+efe:
+  beta_instrumental: 1.0
+  beta_epistemic: 0.1
+  beta_state: 0.0
+  beta_obstacle: 40.0
+  mc_samples: 32
+  temporal_discount: 0.95
+  heading_only_state: true
+
+evaluation:
+  towns:
+    task_b: Town06_Opt

@@ -37,6 +37,9 @@ class TrainingConfig:
     kl_rep_scale: float = 0.1
     lr_warmup_steps: int = 1000
     beta_obstacle_aux: float = 0.0  # auxiliary obstacle prediction loss weight
+    beta_warp_smooth: float = 0.0   # TV regularizer on warp delta field
+    beta_contrastive: float = 0.0   # counterfactual InfoNCE action contrastive
+    contrastive_k: int = 4          # number of shuffled-action negatives
 
 
 @dataclass

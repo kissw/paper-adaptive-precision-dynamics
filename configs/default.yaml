@@ -26,6 +26,9 @@ training:
   kl_dyn_scale: 1.0
   kl_rep_scale: 0.5
   lr_warmup_steps: 1000
+  beta_warp_smooth: 0.0
+  beta_contrastive: 0.0
+  contrastive_k: 4
 
 ensemble:
   num_heads: 5
