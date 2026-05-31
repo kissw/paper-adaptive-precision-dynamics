@@ -54,7 +54,7 @@ preference:
   warmup_epoch: 10
   fit_iters: 300
   fit_lr: 0.005
-  max_samples: 5000
+  max_samples: 5000     #5000, 20000
 
 efe:
   beta_instrumental: 1.0

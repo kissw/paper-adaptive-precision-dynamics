@@ -31,8 +31,8 @@ token_vit:
   stoch_dim: 64
   feat_dim: 320
   num_layers: 4
-  num_prior_layers: 2
-  num_post_layers: 2
+  num_prior_layers: 4
+  num_post_layers: 4
   num_heads: 8
   mlp_ratio: 4.0
   dropout: 0.0
