@@ -30,124 +30,124 @@ echo "VIT_FINAL=$VIT_FINAL"
 echo "EVAL_DIR=$EVAL_DIR"
 
 
-# # ============================================================
-# # 1. Check checkpoint metadata
-# # ============================================================
-# ~/.local/bin/uv run python - <<PY | tee "$EVAL_DIR/checkpoint_metadata.txt"
-# import torch
+# ============================================================
+# 1. Check checkpoint metadata
+# ============================================================
+~/.local/bin/uv run python - <<PY | tee "$EVAL_DIR/checkpoint_metadata.txt"
+import torch
 
-# for name, path in [
-#     ("RSSM", "$RSSM_FINAL"),
-#     ("TokenViT", "$VIT_FINAL"),
-# ]:
-#     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-#     print("=" * 100)
-#     print(name, path)
-#     print("top-level keys:", list(ckpt.keys()))
-#     for k in [
-#         "epoch", "global_step", "best_epoch", "best_loss", "train_loss",
-#         "checkpoint_type", "is_best", "world_model_type", "crop_road",
-#         "image_size", "data_path", "output_dir", "git_branch", "git_commit",
-#         "timestamp"
-#     ]:
-#         print(k, "=", ckpt.get(k, None))
-# PY
-
-
-# # ============================================================
-# # 2. Verify corrected crop-target reconstruction behavior
-# #    Expected after retraining:
-# #    MSE(recon, preprocessed/crop image) < MSE(recon, full image)
-# # ============================================================
-# ~/.local/bin/uv run python - <<'PY' | tee "$EVAL_DIR/reconstruction_target_check.txt"
-# import h5py
-# import torch
-# import torch.nn.functional as F
-
-# from active_inference.config import Config
-# from active_inference.agent import WorldModel
-
-# cases = [
-#     ("RSSM", "configs/experiment/task_b_v5.yaml", "runs/smoke/rssm_64_cropfix_20260530_063140/checkpoints/best.pt"),
-#     ("TokenViT", "configs/experiment/token_vit.yaml", "runs/smoke/token_vit_64_cropfix_20260530_063159/checkpoints/best.pt"),
-# ]
-
-# data_path = "data/expert_data_v4.h5"
-# idx = 1000
-# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# with h5py.File(data_path, "r") as f:
-#     img_full = torch.tensor(f["images"][idx:idx+1], dtype=torch.float32).to(device)
-#     state_vec = torch.tensor(f["states"][idx:idx+1], dtype=torch.float32).to(device)
-#     action_dim = f["actions"].shape[-1]
-
-# for name, cfg_path, ckpt_path in cases:
-#     cfg = Config.from_yaml(cfg_path)
-#     wm = WorldModel(cfg).to(device)
-#     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-#     wm.load_state_dict(ckpt["world_model"], strict=True)
-#     wm.eval()
-
-#     action = torch.zeros(1, action_dim, dtype=torch.float32, device=device)
-
-#     with torch.no_grad():
-#         img_model = wm.preprocess_image(img_full)
-#         rssm_state = wm.rssm.initial(1, device)
-#         embed = wm.encode_obs(img_full, state_vec)
-#         post, prior = wm.rssm.obs_step(rssm_state, action, embed)
-#         recon = wm.decode_obs(post)
-
-#     mse_full = F.mse_loss(recon, img_full).item()
-#     mse_model = F.mse_loss(recon, img_model).item()
-
-#     print("=" * 100)
-#     print(name)
-#     print("cfg:", cfg_path)
-#     print("ckpt:", ckpt_path)
-#     print("cfg.encoder.crop_road:", cfg.encoder.crop_road)
-#     print("wm._crop_road:", getattr(wm, "_crop_road", None))
-#     print("wm.encoder._crop_road:", getattr(wm.encoder, "_crop_road", None))
-#     print("img_full shape:", tuple(img_full.shape), "range:", float(img_full.min()), float(img_full.max()))
-#     print("img_model shape:", tuple(img_model.shape), "range:", float(img_model.min()), float(img_model.max()))
-#     print("recon shape:", tuple(recon.shape), "range:", float(recon.min()), float(recon.max()))
-#     print("MSE(recon, full image):", mse_full)
-#     print("MSE(recon, preprocessed/crop image):", mse_model)
-#     if mse_model < mse_full:
-#         print("Result: OK. Recon is closer to crop/preprocessed target.")
-#     else:
-#         print("Result: WARNING. Recon is still closer to full image.")
-#     print("=" * 100)
-# PY
+for name, path in [
+    ("RSSM", "$RSSM_FINAL"),
+    ("TokenViT", "$VIT_FINAL"),
+]:
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    print("=" * 100)
+    print(name, path)
+    print("top-level keys:", list(ckpt.keys()))
+    for k in [
+        "epoch", "global_step", "best_epoch", "best_loss", "train_loss",
+        "checkpoint_type", "is_best", "world_model_type", "crop_road",
+        "image_size", "data_path", "output_dir", "git_branch", "git_commit",
+        "timestamp"
+    ]:
+        print(k, "=", ckpt.get(k, None))
+PY
 
 
-# # ============================================================
-# # 3. RSSM pooled contrastive GMM
-# # ============================================================
-# ~/.local/bin/uv run python scripts/fit_contrastive_preference.py \
-#     --checkpoint "$RSSM_FINAL" \
-#     --clean_data data/expert_data_town04.h5 \
-#     --obstacle_data data/expert_data_v4.h5 \
-#     --output "$EVAL_DIR/rssm_pooled_contrastive_k5k7_s20000.pt" \
-#     --config configs/experiment/task_b_v5.yaml \
-#     --K_clean 5 \
-#     --K_avoid 7 \
-#     --max_samples 20000 \
-#     2>&1 | tee "$EVAL_DIR/rssm_pooled_contrastive_k5k7_s20000.log"
+# ============================================================
+# 2. Verify corrected crop-target reconstruction behavior
+#    Expected after retraining:
+#    MSE(recon, preprocessed/crop image) < MSE(recon, full image)
+# ============================================================
+~/.local/bin/uv run python - <<'PY' | tee "$EVAL_DIR/reconstruction_target_check.txt"
+import h5py
+import torch
+import torch.nn.functional as F
+
+from active_inference.config import Config
+from active_inference.agent import WorldModel
+
+cases = [
+    ("RSSM", "configs/experiment/task_b_v5.yaml", "runs/smoke/rssm_64_cropfix_20260530_063140/checkpoints/best.pt"),
+    ("TokenViT", "configs/experiment/token_vit.yaml", "runs/smoke/token_vit_64_cropfix_20260530_063159/checkpoints/best.pt"),
+]
+
+data_path = "data/expert_data_v4.h5"
+idx = 1000
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+with h5py.File(data_path, "r") as f:
+    img_full = torch.tensor(f["images"][idx:idx+1], dtype=torch.float32).to(device)
+    state_vec = torch.tensor(f["states"][idx:idx+1], dtype=torch.float32).to(device)
+    action_dim = f["actions"].shape[-1]
+
+for name, cfg_path, ckpt_path in cases:
+    cfg = Config.from_yaml(cfg_path)
+    wm = WorldModel(cfg).to(device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+    wm.load_state_dict(ckpt["world_model"], strict=True)
+    wm.eval()
+
+    action = torch.zeros(1, action_dim, dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        img_model = wm.preprocess_image(img_full)
+        rssm_state = wm.rssm.initial(1, device)
+        embed = wm.encode_obs(img_full, state_vec)
+        post, prior = wm.rssm.obs_step(rssm_state, action, embed)
+        recon = wm.decode_obs(post)
+
+    mse_full = F.mse_loss(recon, img_full).item()
+    mse_model = F.mse_loss(recon, img_model).item()
+
+    print("=" * 100)
+    print(name)
+    print("cfg:", cfg_path)
+    print("ckpt:", ckpt_path)
+    print("cfg.encoder.crop_road:", cfg.encoder.crop_road)
+    print("wm._crop_road:", getattr(wm, "_crop_road", None))
+    print("wm.encoder._crop_road:", getattr(wm.encoder, "_crop_road", None))
+    print("img_full shape:", tuple(img_full.shape), "range:", float(img_full.min()), float(img_full.max()))
+    print("img_model shape:", tuple(img_model.shape), "range:", float(img_model.min()), float(img_model.max()))
+    print("recon shape:", tuple(recon.shape), "range:", float(recon.min()), float(recon.max()))
+    print("MSE(recon, full image):", mse_full)
+    print("MSE(recon, preprocessed/crop image):", mse_model)
+    if mse_model < mse_full:
+        print("Result: OK. Recon is closer to crop/preprocessed target.")
+    else:
+        print("Result: WARNING. Recon is still closer to full image.")
+    print("=" * 100)
+PY
 
 
-# # ============================================================
-# # 4. TokenViT pooled contrastive GMM
-# # ============================================================
-# ~/.local/bin/uv run python scripts/fit_contrastive_preference.py \
-#     --checkpoint "$VIT_FINAL" \
-#     --clean_data data/expert_data_town04.h5 \
-#     --obstacle_data data/expert_data_v4.h5 \
-#     --output "$EVAL_DIR/tokenvit_pooled_contrastive_k5k7_s20000.pt" \
-#     --config configs/experiment/token_vit.yaml \
-#     --K_clean 5 \
-#     --K_avoid 7 \
-#     --max_samples 20000 \
-#     2>&1 | tee "$EVAL_DIR/tokenvit_pooled_contrastive_k5k7_s20000.log"
+# ============================================================
+# 3. RSSM pooled contrastive GMM
+# ============================================================
+~/.local/bin/uv run python scripts/fit_contrastive_preference.py \
+    --checkpoint "$RSSM_FINAL" \
+    --clean_data data/expert_data_town04.h5 \
+    --obstacle_data data/expert_data_v4.h5 \
+    --output "$EVAL_DIR/rssm_pooled_contrastive_k5k7_s20000.pt" \
+    --config configs/experiment/task_b_v5.yaml \
+    --K_clean 5 \
+    --K_avoid 7 \
+    --max_samples 20000 \
+    2>&1 | tee "$EVAL_DIR/rssm_pooled_contrastive_k5k7_s20000.log"
+
+
+# ============================================================
+# 4. TokenViT pooled contrastive GMM
+# ============================================================
+~/.local/bin/uv run python scripts/fit_contrastive_preference.py \
+    --checkpoint "$VIT_FINAL" \
+    --clean_data data/expert_data_town04.h5 \
+    --obstacle_data data/expert_data_v4.h5 \
+    --output "$EVAL_DIR/tokenvit_pooled_contrastive_k5k7_s20000.pt" \
+    --config configs/experiment/token_vit.yaml \
+    --K_clean 5 \
+    --K_avoid 7 \
+    --max_samples 20000 \
+    2>&1 | tee "$EVAL_DIR/tokenvit_pooled_contrastive_k5k7_s20000.log"
 
 
 # ============================================================
