@@ -14,14 +14,29 @@ class SequenceDataset(Dataset):
             self._images = torch.from_numpy(f["images"][:])
             self._states = torch.from_numpy(f["states"][:])
             self._actions = torch.from_numpy(f["actions"][:])
-            # Obstacle labels: task_label=1 for obstacle-present data
-            if "task_labels" in f:
+
+            # Frame-level obstacle labels for auxiliary obstacle prediction.
+            #
+            # Priority:
+            #   1. obstacle_visible: true frame-level visual label from v5.
+            #   2. task_labels: legacy scenario/episode-level label.
+            #   3. zeros: obstacle-free or unlabeled legacy data.
+            #
+            # Do not prefer task_labels when obstacle_visible exists. In v5,
+            # task_labels == 1 means "obstacle scenario episode", while
+            # obstacle_visible == 1 means "obstacle is visible in this frame".
+            if "obstacle_visible" in f:
                 self._obstacle_labels = torch.from_numpy(
-                    f["task_labels"][:].astype(np.float32),
+                    f["obstacle_visible"][:].astype(np.float32)
+                )
+            elif "task_labels" in f:
+                self._obstacle_labels = torch.from_numpy(
+                    f["task_labels"][:].astype(np.float32)
                 )
             else:
                 self._obstacle_labels = torch.zeros(
-                    self.total_samples, dtype=torch.float32,
+                    self.total_samples,
+                    dtype=torch.float32,
                 )
 
         self.valid_starts = []
@@ -56,7 +71,8 @@ class PreferenceSequenceDataset(Dataset):
         with h5py.File(h5_path, "r") as f:
             self.total_samples = len(f["episode_ids"])
             episode_ids = f["episode_ids"][:]
-            # Preload all data into memory
+
+            # Preload all data into memory.
             self._images = torch.from_numpy(f["images"][:])
             self._states = torch.from_numpy(f["states"][:])
             self._actions = torch.from_numpy(f["actions"][:])
@@ -64,10 +80,14 @@ class PreferenceSequenceDataset(Dataset):
             has_success = "success_flags" in f
             has_task = "task_labels" in f
             success_flags = (
-                f["success_flags"][:] if has_success else np.ones(self.total_samples, dtype=bool)
+                f["success_flags"][:]
+                if has_success
+                else np.ones(self.total_samples, dtype=bool)
             )
             task_labels = (
-                f["task_labels"][:] if has_task else np.zeros(self.total_samples, dtype=np.int8)
+                f["task_labels"][:]
+                if has_task
+                else np.zeros(self.total_samples, dtype=np.int8)
             )
 
         frame_mask = np.ones(self.total_samples, dtype=bool)
@@ -94,7 +114,11 @@ class PreferenceSequenceDataset(Dataset):
 
 
 def get_dataloader(
-    h5_path: str, batch_size=32, seq_len=50, num_workers=4, shuffle=True
+    h5_path: str,
+    batch_size=32,
+    seq_len=50,
+    num_workers=4,
+    shuffle=True,
 ) -> DataLoader:
     dataset = SequenceDataset(h5_path, seq_len=seq_len)
     return DataLoader(
