@@ -31,25 +31,40 @@ from active_inference.training.preference import ContrastivePreferenceModel
 
 
 def encode_latents(agent, data_path, max_samples=5000):
-    """Encode HDF5 data into RSSM posterior means."""
+    """Encode HDF5 data into RSSM posterior means.
+
+    Improvements over the original version:
+    - Loads actions and episode_ids from the HDF5 file.
+    - Uses prev_act = actions[i-1] at each step (correct temporal context).
+    - Resets RSSM state and prev_act at episode boundaries so that
+      cross-episode state bleed-over is eliminated.
+    """
     with h5py.File(data_path, "r") as f:
-        images = torch.tensor(f["images"][:max_samples], dtype=torch.float32)
-        states = torch.tensor(f["states"][:max_samples], dtype=torch.float32)
+        n = min(len(f["images"]), max_samples)
+        images = torch.tensor(f["images"][:n], dtype=torch.float32)
+        states = torch.tensor(f["states"][:n], dtype=torch.float32)
+        actions = torch.tensor(f["actions"][:n], dtype=torch.float32)
+        episode_ids = f["episode_ids"][:n]
 
     wm = agent.world_model
     dev = agent._device
     latents = []
+    action_dim = agent._cfg.cem.action_dim
 
     with torch.no_grad():
         state = wm.rssm.initial(1, dev)
-        prev_act = torch.zeros(1, agent._cfg.cem.action_dim, device=dev)
-        for i in range(min(len(images), max_samples)):
+        prev_act = torch.zeros(1, action_dim, device=dev)
+        for i in range(n):
+            if i > 0 and episode_ids[i] != episode_ids[i - 1]:
+                state = wm.rssm.initial(1, dev)
+                prev_act = torch.zeros(1, action_dim, device=dev)
             img = images[i : i + 1].to(dev)
             st = states[i : i + 1].to(dev)
             embed = wm.encode_obs(img, st)
             post, _ = wm.rssm.obs_step(state, prev_act, embed)
             latents.append(post.mean.cpu())
             state = type(post)(*[x.detach() for x in post])
+            prev_act = actions[i : i + 1].to(dev)
 
     return torch.cat(latents).to(dev)
 

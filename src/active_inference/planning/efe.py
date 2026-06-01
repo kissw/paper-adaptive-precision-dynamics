@@ -98,6 +98,11 @@ class EFEScorer:
         In AIF terms: this is the expected observation-level free energy.
         The agent prefers futures where its predicted observations match
         its prior preference (obstacle-free road).
+
+        Contract: ref_image is assumed to already have crop_road applied
+        when cfg.encoder.crop_road=True (WorldModel.preprocess_image is
+        called by step_with_info before this function is invoked, so
+        ref_image and the decoder output live in the same image space).
         """
         decoded_img = obs_decoder(feat)  # [B, C, H, W]
         # ref_image is [1, C, H, W] — expand to batch
