@@ -18,6 +18,7 @@ venv/
 *.swo
 
 # Data & outputs
+data/
 data/*.h5
 data/*.hdf5
 data/raw/
