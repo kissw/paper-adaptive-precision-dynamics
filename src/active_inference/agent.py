@@ -292,24 +292,22 @@ class DeepAIFAgent:
             "kl_dyn": 0.0, "kl_rep": 0.0, "obs_aux_loss": 0.0,
         }
 
+        # Dataset convention used by the v5 collectors:
+        #   action[t] is the action applied by env.step(action[t]) that produced
+        #   image[t], state[t]. Therefore obs_step at timestep t must be
+        #   conditioned on actions[:, t], not on a one-step-delayed prev_action.
         prev_state = wm.rssm.initial(B, self._device)
-        prev_action = torch.zeros(
-            B, self._cfg.cem.action_dim, device=self._device,
-        )
 
         for t in range(T):
             img_raw_t = images[:, t].to(self._device)
             img_t = wm.preprocess_image(img_raw_t)  # encoder input == recon target
             st_t = states[:, t].to(self._device)
-            act_t = (
-                actions[:, t].to(self._device) if t > 0
-                else prev_action
-            )
+            act_t = actions[:, t].to(self._device)
 
             with torch.amp.autocast("cuda", enabled=self._use_amp):
                 embed = wm.encoder(img_t, st_t)
                 post, prior = wm.rssm.obs_step(
-                    prev_state, prev_action, embed,
+                    prev_state, act_t, embed,
                 )
 
                 feat = wm.rssm.get_feat(post)
@@ -351,9 +349,6 @@ class DeepAIFAgent:
                 prev_state = type(post)(
                     *[x.detach() for x in post],
                 )
-                prev_action = (
-                    act_t.detach() if t > 0 else prev_action
-                )
                 continue
 
             scaled_loss = loss / T
@@ -369,9 +364,6 @@ class DeepAIFAgent:
 
             prev_state = type(post)(
                 *[x.detach() for x in post],
-            )
-            prev_action = (
-                act_t.detach() if t > 0 else prev_action
             )
 
         if self._scaler is not None:
@@ -487,17 +479,16 @@ class DeepAIFAgent:
         for images, states, actions in pref_loader:
             B, T = images.shape[:2]
             state = wm.rssm.initial(B, self._device)
-            prev_act = torch.zeros(B, self._cfg.cem.action_dim, device=self._device)
 
             for t in range(T):
+                act_t = actions[:, t].to(self._device)
                 embed = wm.encode_obs(
                     images[:, t].to(self._device),
                     states[:, t].to(self._device),
                 )
-                post, _ = wm.rssm.obs_step(state, prev_act, embed)
+                post, _ = wm.rssm.obs_step(state, act_t, embed)
                 latents.append(post.mean.cpu())
                 state = type(post)(*[x.detach() for x in post])
-                prev_act = actions[:, t].to(self._device)
 
             count += B * T
             if count >= max_samples:

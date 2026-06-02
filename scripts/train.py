@@ -1,7 +1,6 @@
 import argparse
 import dataclasses
 import subprocess
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from active_inference.config import Config
 from active_inference.agent import DeepAIFAgent
 from active_inference.data.dataset import get_dataloader, get_preference_dataloader
 from active_inference.data.synthetic import SyntheticDrivingData
+from active_inference.training.losses import compute_vfe
 from active_inference.utils.seed import set_seed
 
 
@@ -51,6 +51,7 @@ def build_checkpoint(
     epoch: int,
     global_step: int | None,
     train_loss: float | None,
+    val_loss: float | None,
     best_epoch: int | None,
     best_loss: float | None,
     checkpoint_type: str,
@@ -59,52 +60,167 @@ def build_checkpoint(
     """Build a checkpoint dict with metadata.
 
     Preserves the existing top-level keys (world_model, optimizer, preference)
-    so that all downstream scripts (fit_*_preference, compare_rollout) continue
-    to work unchanged.
+    so that all downstream scripts continue to work unchanged.
     """
     git_commit, git_branch = _get_git_info()
 
     pref = agent.preference
     try:
         pref_dict = {
-            "means":     pref.means.data,
-            "log_stds":  pref.log_stds.data,
-            "logits":    pref.logits.data,
+            "means": pref.means.data,
+            "log_stds": pref.log_stds.data,
+            "logits": pref.logits.data,
         }
     except AttributeError:
         pref_dict = {}
 
     return {
-        # ---- existing keys (unchanged) ----
         "world_model": agent.world_model.state_dict(),
-        "optimizer":   agent._optimizer.state_dict(),
-        "preference":  pref_dict,
-
-        # ---- metadata ----
-        "epoch":            int(epoch),
-        "global_step":      int(global_step) if global_step is not None else None,
-        "best_epoch":       int(best_epoch)  if best_epoch  is not None else None,
-        "best_metric":      float(best_loss) if best_loss   is not None else None,
-        "best_loss":        float(best_loss) if best_loss   is not None else None,
-        "train_loss":       float(train_loss) if train_loss is not None else None,
-        "config":           _safe_config_to_dict(cfg),
+        "optimizer": agent._optimizer.state_dict(),
+        "preference": pref_dict,
+        "epoch": int(epoch),
+        "global_step": int(global_step) if global_step is not None else None,
+        "best_epoch": int(best_epoch) if best_epoch is not None else None,
+        "best_metric": float(best_loss) if best_loss is not None else None,
+        "best_loss": float(best_loss) if best_loss is not None else None,
+        "train_loss": float(train_loss) if train_loss is not None else None,
+        "val_loss": float(val_loss) if val_loss is not None else None,
+        "config": _safe_config_to_dict(cfg),
         "world_model_type": getattr(getattr(cfg, "model", None), "world_model_type", None),
-        "crop_road":        getattr(getattr(cfg, "encoder", None), "crop_road", None),
-        "image_size":       getattr(getattr(cfg, "encoder", None), "image_size", None),
-        "data_path":        getattr(args, "data", None),
-        "output_dir":       getattr(args, "output_dir", None),
-        "checkpoint_type":  checkpoint_type,
-        "is_best":          bool(is_best),
-        "timestamp":        datetime.now().isoformat(timespec="seconds"),
-        "git_commit":       git_commit,
-        "git_branch":       git_branch,
+        "crop_road": getattr(getattr(cfg, "encoder", None), "crop_road", None),
+        "image_size": getattr(getattr(cfg, "encoder", None), "image_size", None),
+        "data_path": getattr(args, "data", None),
+        "valid_data_path": getattr(args, "valid_data", None),
+        "output_dir": getattr(args, "output_dir", None),
+        "checkpoint_type": checkpoint_type,
+        "is_best": bool(is_best),
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "git_commit": git_commit,
+        "git_branch": git_branch,
     }
+
+
+@torch.no_grad()
+def evaluate_world_model(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
+    """Evaluate world-model VFE on a held-out HDF5 split.
+
+    This mirrors DeepAIFAgent.update() without optimizer/backward.
+
+    Dataset convention:
+        action[t] is the action applied by env.step(action[t]) that produced
+        image[t], state[t]. Therefore obs_step at timestep t is conditioned on
+        actions[:, t], matching the fixed training path in agent.update().
+    """
+    wm = agent.world_model
+    device = agent._device
+    cfg = agent._cfg.training
+    beta_obstacle_aux = getattr(cfg, "beta_obstacle_aux", 0.0)
+
+    was_training = wm.training
+    wm.eval()
+
+    n_batches = 0
+    totals = {
+        "total_loss": 0.0,
+        "img_loss": 0.0,
+        "state_loss": 0.0,
+        "kl_dyn": 0.0,
+        "kl_rep": 0.0,
+        "obs_aux_loss": 0.0,
+    }
+
+    for batch in tqdm(dataloader, desc="Validation", leave=False):
+        if len(batch) == 4:
+            images, states, actions, obs_labels = batch
+        else:
+            images, states, actions = batch
+            obs_labels = None
+
+        B, T = images.shape[0], images.shape[1]
+        prev_state = wm.rssm.initial(B, device)
+
+        batch_total = 0.0
+        batch_accum = {
+            "img_loss": 0.0,
+            "state_loss": 0.0,
+            "kl_dyn": 0.0,
+            "kl_rep": 0.0,
+            "obs_aux_loss": 0.0,
+        }
+        valid_steps = 0
+
+        for t in range(T):
+            img_raw_t = images[:, t].to(device)
+            img_t = wm.preprocess_image(img_raw_t)
+            st_t = states[:, t].to(device)
+            act_t = actions[:, t].to(device)
+
+            with torch.amp.autocast("cuda", enabled=agent._use_amp):
+                embed = wm.encoder(img_t, st_t)
+                post, prior = wm.rssm.obs_step(prev_state, act_t, embed)
+
+                feat = wm.rssm.get_feat(post)
+                recon_img = wm.decode_obs(post)
+                recon_state = wm.state_decoder(feat)
+
+                post_mean, post_std = wm.get_kl_stats(post)
+                prior_mean, prior_std = wm.get_kl_stats(prior)
+                loss, info = compute_vfe(
+                    post_mean,
+                    post_std,
+                    prior_mean,
+                    prior_std,
+                    img_t,
+                    recon_img,
+                    st_t,
+                    recon_state,
+                    free_nats=cfg.free_nats,
+                    kl_dyn_scale=cfg.kl_dyn_scale,
+                    kl_rep_scale=cfg.kl_rep_scale,
+                )
+
+                obs_aux_loss_val = 0.0
+                if obs_labels is not None and beta_obstacle_aux > 0:
+                    obs_logit = wm.obstacle_head(feat).squeeze(-1)
+                    obs_label = obs_labels[:, t].to(device).float()
+                    obs_aux = torch.nn.functional.binary_cross_entropy_with_logits(
+                        obs_logit,
+                        obs_label,
+                    )
+                    loss = loss + beta_obstacle_aux * obs_aux
+                    obs_aux_loss_val = obs_aux.item()
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                prev_state = type(post)(*[x.detach() for x in post])
+                continue
+
+            batch_total += loss.item()
+            for k in ["img_loss", "state_loss", "kl_dyn", "kl_rep"]:
+                batch_accum[k] += info[k].item()
+            batch_accum["obs_aux_loss"] += obs_aux_loss_val
+            valid_steps += 1
+
+            prev_state = type(post)(*[x.detach() for x in post])
+
+        if valid_steps > 0:
+            n_batches += 1
+            totals["total_loss"] += batch_total / valid_steps
+            for k in batch_accum:
+                totals[k] += batch_accum[k] / valid_steps
+
+    if was_training:
+        wm.train()
+
+    if n_batches == 0:
+        return {k: float("nan") for k in totals}
+    return {k: v / n_batches for k, v in totals.items()}
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--data", default=None)
+    parser.add_argument("--valid_data", default=None, help="Optional held-out HDF5 validation split")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--output_dir", default="outputs/train")
@@ -141,6 +257,18 @@ def main():
         shuffle=True,
     )
 
+    valid_loader = None
+    if args.valid_data is not None:
+        valid_loader = get_dataloader(
+            args.valid_data,
+            batch_size=cfg.training.batch_size,
+            seq_len=cfg.training.seq_len,
+            num_workers=0,
+            shuffle=False,
+        )
+        print(f"Using validation data: {args.valid_data}")
+        print(f"Validation sequences: {len(valid_loader.dataset)}")
+
     agent = DeepAIFAgent(cfg)
 
     start_epoch = args.start_epoch
@@ -162,6 +290,7 @@ def main():
     best_epoch: int | None = None
     epoch_losses: list[float] = []
     mean_loss: float = 0.0
+    last_val_loss: float | None = None
 
     for epoch in range(start_epoch, cfg.training.epochs):
         epoch_losses = []
@@ -201,8 +330,23 @@ def main():
         print(f"Epoch {epoch + 1}/{cfg.training.epochs} | Loss: {mean_loss:.4f}")
         writer.add_scalar("train/epoch_loss", mean_loss, epoch)
 
-        if mean_loss < best_loss:
-            best_loss = mean_loss
+        if valid_loader is not None:
+            val_info = evaluate_world_model(agent, valid_loader)
+            last_val_loss = val_info["total_loss"]
+            for k, v in val_info.items():
+                writer.add_scalar(f"valid/{k}", v, epoch)
+            print(
+                f"  Validation | Loss: {last_val_loss:.4f} "
+                f"img={val_info['img_loss']:.4f} "
+                f"state={val_info['state_loss']:.4f} "
+                f"kl_dyn={val_info['kl_dyn']:.4f} "
+                f"kl_rep={val_info['kl_rep']:.4f}"
+            )
+
+        selection_loss = last_val_loss if valid_loader is not None else mean_loss
+
+        if selection_loss < best_loss:
+            best_loss = selection_loss
             best_epoch = epoch + 1
             torch.save(
                 build_checkpoint(
@@ -210,6 +354,7 @@ def main():
                     epoch=epoch + 1,
                     global_step=global_step,
                     train_loss=mean_loss,
+                    val_loss=last_val_loss,
                     best_epoch=best_epoch,
                     best_loss=best_loss,
                     checkpoint_type="best",
@@ -217,16 +362,18 @@ def main():
                 ),
                 str(ckpt_dir / "best.pt"),
             )
+
         torch.save(
             build_checkpoint(
                 agent, cfg, args,
                 epoch=epoch + 1,
                 global_step=global_step,
                 train_loss=mean_loss,
+                val_loss=last_val_loss,
                 best_epoch=best_epoch,
                 best_loss=best_loss,
                 checkpoint_type="epoch",
-                is_best=(mean_loss == best_loss),
+                is_best=(selection_loss == best_loss),
             ),
             str(ckpt_dir / f"epoch_{epoch + 1}.pt"),
         )
@@ -267,6 +414,7 @@ def main():
             epoch=cfg.training.epochs,
             global_step=global_step,
             train_loss=mean_loss if epoch_losses else None,
+            val_loss=last_val_loss,
             best_epoch=best_epoch,
             best_loss=best_loss if best_loss < float("inf") else None,
             checkpoint_type="final",
