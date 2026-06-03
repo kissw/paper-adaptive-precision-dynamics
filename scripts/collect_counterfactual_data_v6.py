@@ -7,8 +7,10 @@ This script collects branch-structured counterfactual driving sequences:
 
     sequence = BasicAgent context frames + counterfactual branch frames
 
-For each anchor state, the script restores the same CARLA actor state and
-rolls out multiple steering branches sampled from continuous steering bins.
+For each anchor state, the script restores the context-start CARLA actor state,
+replays the same context actions, and then rolls out steering branches sampled
+from continuous steering bins. This avoids branch-to-branch hidden vehicle
+physics artifacts that can occur when directly teleporting to the anchor.
 
 Default smoke setting:
     clean anchors    = 5
@@ -150,6 +152,14 @@ class ActorState:
 
 
 @dataclass
+class WorldSnapshot:
+    """CARLA actor states required for deterministic-ish context replay."""
+
+    ego: ActorState
+    obstacles: list[tuple[Any, ActorState]]
+
+
+@dataclass
 class AnchorSnapshot:
     ego: ActorState
     obstacles: list[tuple[Any, ActorState]]
@@ -174,6 +184,42 @@ def _actor_state(actor) -> ActorState:
         angular_velocity=actor.get_angular_velocity(),
         control=control,
     )
+
+
+def make_world_snapshot(env, obstacle_actors: list) -> WorldSnapshot:
+    """Snapshot ego + obstacle actor states before a control is applied."""
+    obstacles = []
+    for item in obstacle_actors:
+        actor = item[0] if isinstance(item, tuple) else item
+        obstacles.append((actor, _actor_state(actor)))
+    return WorldSnapshot(ego=_actor_state(env._vehicle), obstacles=obstacles)
+
+
+def restore_world_snapshot(env, snapshot: WorldSnapshot) -> None:
+    """Restore ego + obstacle actor states and clear transient event/sensor queues."""
+    import carla
+
+    for actor, st in snapshot.obstacles:
+        if actor is None or not actor.is_alive:
+            continue
+        actor.set_transform(st.transform)
+        actor.set_target_velocity(carla.Vector3D(0.0, 0.0, 0.0))
+        actor.set_target_angular_velocity(carla.Vector3D(0.0, 0.0, 0.0))
+        try:
+            actor.apply_control(carla.VehicleControl(throttle=0.0, brake=1.0))
+        except Exception:
+            pass
+
+    ego = env._vehicle
+    ego.set_transform(snapshot.ego.transform)
+    ego.set_target_velocity(snapshot.ego.velocity)
+    ego.set_target_angular_velocity(snapshot.ego.angular_velocity)
+    if snapshot.ego.control is not None:
+        ego.apply_control(snapshot.ego.control)
+
+    env._collision_flag = False
+    env._lane_invasion_flag = False
+    clear_sensor_queues(env)
 
 
 def make_snapshot(
@@ -445,11 +491,12 @@ def compute_meta_for_mode(
     return default_obstacle_meta(env, image_size)
 
 
-def collect_branch(
+def collect_branch_with_context_replay(
     *,
     env,
     carla_map,
-    snapshot: AnchorSnapshot,
+    context_start_snapshot: WorldSnapshot,
+    context_frames_nominal: list[dict[str, Any]],
     cf_action: np.ndarray,
     mode: str,
     obstacle_actors: list,
@@ -458,11 +505,102 @@ def collect_branch(
     diagnostic_horizon: int,
     visible_distance_threshold: float,
     visible_bbox_area_threshold: float,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    restore_snapshot(env, snapshot)
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], AnchorSnapshot | None]:
+    """Replay context from a pre-context snapshot, then collect one CF branch.
+
+    This is the critical fix over the old anchor-restore method.
+
+    Old behavior:
+        restore anchor snapshot -> apply cf_action
+
+    New behavior:
+        restore context-start snapshot -> replay the same context actions -> apply cf_action
+
+    Replaying the context lets CARLA rebuild wheel/vehicle internal dynamics before
+    the counterfactual branch, which makes branch responses more consistent.
+    """
+    restore_world_snapshot(env, context_start_snapshot)
+
+    replayed_context_frames: list[dict[str, Any]] = []
+
+    # Recreate the context by replaying the exact actions that produced the
+    # nominal context frames. These replayed frames are what get saved, not the
+    # copied nominal frames, so each sequence is physically continuous.
+    for nominal_frame in context_frames_nominal:
+        context_action = np.asarray(nominal_frame["action"], dtype=np.float32)
+        expert_action = np.asarray(nominal_frame["expert_action"], dtype=np.float32)
+
+        obs, info = env.step(context_action)
+        img, state = obs
+        meta = compute_meta_for_mode(
+            mode=mode,
+            env=env,
+            obstacle_actors=obstacle_actors,
+            image_size=image_size,
+            visible_distance_threshold=visible_distance_threshold,
+            visible_bbox_area_threshold=visible_bbox_area_threshold,
+        )
+        lane_id, lat_dev = get_lane_info(env, carla_map)
+        step_collision = bool(info.get("collision", False))
+        step_lane_invasion = bool(info.get("lane_invasion", False))
+
+        replayed_context_frames.append(
+            make_frame(
+                image=img,
+                state=state,
+                action=context_action,
+                expert_action=expert_action,
+                lane_id=lane_id,
+                lateral_dev=lat_dev,
+                meta=meta,
+                step_collision=step_collision,
+                step_lane_invasion=step_lane_invasion,
+            )
+        )
+
+        # If the replayed nominal context already collides, this anchor is not
+        # reliable for counterfactual comparison. Drop this branch.
+        if step_collision:
+            diag = {
+                "collision_10": True,
+                "lane_invasion_10": step_lane_invasion,
+                "collision_diag": True,
+                "lane_invasion_diag": step_lane_invasion,
+                "final_abs_cte_delta_10": float("nan"),
+                "final_abs_cte_delta_diag": float("nan"),
+                "max_abs_cte_delta_10": float("nan"),
+                "max_abs_cte_delta_diag": float("nan"),
+            }
+            return replayed_context_frames, [], diag, None
+
+    if len(replayed_context_frames) == 0:
+        diag = {
+            "collision_10": True,
+            "lane_invasion_10": True,
+            "collision_diag": True,
+            "lane_invasion_diag": True,
+            "final_abs_cte_delta_10": float("nan"),
+            "final_abs_cte_delta_diag": float("nan"),
+            "max_abs_cte_delta_10": float("nan"),
+            "max_abs_cte_delta_diag": float("nan"),
+        }
+        return replayed_context_frames, [], diag, None
+
+    anchor_frame = replayed_context_frames[-1]
+    branch_anchor_snapshot = make_snapshot(
+        env=env,
+        obstacle_actors=obstacle_actors,
+        anchor_image=anchor_frame["image"],
+        anchor_state=anchor_frame["state"],
+        anchor_expert_action=anchor_frame["expert_action"],
+        anchor_nominal_action=anchor_frame["action"],
+        anchor_meta=anchor_frame["meta"],
+        anchor_lane_id=anchor_frame["lane_id"],
+        anchor_lateral_dev=anchor_frame["lateral_dev"],
+    )
 
     branch_frames: list[dict[str, Any]] = []
-    cte0 = float(snapshot.anchor_state[3])
+    cte0 = float(anchor_frame["state"][3])
     cte_deltas_10: list[float] = []
     cte_deltas_diag: list[float] = []
     collision_10 = False
@@ -495,7 +633,7 @@ def collect_branch(
                     image=img,
                     state=state,
                     action=cf_action,
-                    expert_action=snapshot.anchor_expert_action,
+                    expert_action=branch_anchor_snapshot.anchor_expert_action,
                     lane_id=lane_id,
                     lateral_dev=lat_dev,
                     meta=meta,
@@ -518,8 +656,7 @@ def collect_branch(
         "max_abs_cte_delta_10": max(cte_deltas_10) if cte_deltas_10 else float("nan"),
         "max_abs_cte_delta_diag": max(cte_deltas_diag) if cte_deltas_diag else float("nan"),
     }
-    return branch_frames, diag
-
+    return replayed_context_frames, branch_frames, diag, branch_anchor_snapshot
 
 def should_take_anchor(
     *,
@@ -643,6 +780,7 @@ def collect_mode(
             agent.set_destination(goal_loc)
 
             context_buffer: deque = deque(maxlen=args.context_len)
+            context_start_snapshot_buffer: deque = deque(maxlen=args.context_len)
             stable_ticks = 0
             last_anchor_tick = -10**9
             ep_collisions = 0
@@ -699,6 +837,11 @@ def collect_mode(
                 nominal_noise = rng.normal(0.0, np.asarray(args.nominal_noise_sigma, dtype=np.float32))
                 nominal_action = np.clip(expert_action + nominal_noise, -1.0, 1.0).astype(np.float32)
 
+                # Snapshot BEFORE applying nominal_action. This snapshot is aligned
+                # with the resulting frame in context_buffer and is used as the
+                # context-start state for branch replay.
+                pre_step_snapshot = make_world_snapshot(env, obstacle_actors)
+
                 obs, info = env.step(nominal_action)
                 img, state = obs
                 meta = compute_meta_for_mode(
@@ -728,6 +871,7 @@ def collect_mode(
                     step_lane_invasion=bool(info.get("lane_invasion", False)),
                 )
                 context_buffer.append(frame)
+                context_start_snapshot_buffer.append(pre_step_snapshot)
 
                 if info.get("collision", False):
                     ep_collisions += 1
@@ -747,6 +891,7 @@ def collect_mode(
                     max_obstacle_distance=args.max_obstacle_distance,
                 ):
                     context_frames = list(context_buffer)
+                    context_start_snapshot = context_start_snapshot_buffer[0]
                     snapshot = make_snapshot(
                         env=env,
                         obstacle_actors=obstacle_actors,
@@ -768,21 +913,27 @@ def collect_mode(
                     anchor_branch_diags = []
                     for bin_id, steer in steer_samples:
                         cf_action = np.array([steer, float(expert_action[1])], dtype=np.float32)
-                        branch_frames, branch_diag = collect_branch(
-                            env=env,
-                            carla_map=carla_map,
-                            snapshot=snapshot,
-                            cf_action=cf_action,
-                            mode=mode,
-                            obstacle_actors=obstacle_actors,
-                            image_size=args.image_size,
-                            branch_horizon=args.branch_horizon,
-                            diagnostic_horizon=args.diagnostic_horizon,
-                            visible_distance_threshold=args.visible_distance_threshold,
-                            visible_bbox_area_threshold=args.visible_bbox_area_threshold,
+                        replayed_context_frames, branch_frames, branch_diag, branch_anchor_snapshot = (
+                            collect_branch_with_context_replay(
+                                env=env,
+                                carla_map=carla_map,
+                                context_start_snapshot=context_start_snapshot,
+                                context_frames_nominal=context_frames,
+                                cf_action=cf_action,
+                                mode=mode,
+                                obstacle_actors=obstacle_actors,
+                                image_size=args.image_size,
+                                branch_horizon=args.branch_horizon,
+                                diagnostic_horizon=args.diagnostic_horizon,
+                                visible_distance_threshold=args.visible_distance_threshold,
+                                visible_bbox_area_threshold=args.visible_bbox_area_threshold,
+                            )
                         )
-                        if len(branch_frames) != args.branch_horizon:
-                            restore_snapshot(env, snapshot)
+                        if (
+                            len(replayed_context_frames) != args.context_len
+                            or len(branch_frames) != args.branch_horizon
+                            or branch_anchor_snapshot is None
+                        ):
                             continue
                         accum.append_sequence(
                             episode_id=global_episode_id,
@@ -790,13 +941,13 @@ def collect_mode(
                             branch_id=global_branch_id,
                             bin_id=bin_id,
                             sampled_steer=steer,
-                            context_frames=context_frames,
+                            context_frames=replayed_context_frames,
                             branch_frames=branch_frames,
                             task_label=0 if mode == "clean" else 1,
                             target_speed=args.target_speed,
                             nominal_noise_sigma=tuple(args.nominal_noise_sigma),
                             branch_diag=branch_diag,
-                            anchor_snapshot=snapshot,
+                            anchor_snapshot=branch_anchor_snapshot,
                         )
                         row = {
                             "mode": mode,
@@ -810,7 +961,6 @@ def collect_mode(
                         anchor_branch_diags.append(row)
                         global_branch_id += 1
                         global_episode_id += 1
-                        restore_snapshot(env, snapshot)
 
                     anchors_done += 1
                     ep_anchors += 1
@@ -913,6 +1063,7 @@ def main() -> None:
         print(f"context_len: {args.context_len}")
         print(f"branch_horizon: {args.branch_horizon}")
         print(f"diagnostic_horizon: {args.diagnostic_horizon}")
+        print("replay_context_for_each_branch: True")
         print(f"steer range: [{args.steer_min}, {args.steer_max}]")
         print(f"steer_bins: {args.steer_bins}")
         print(f"samples_per_bin: {args.samples_per_bin}")
@@ -966,6 +1117,7 @@ def main() -> None:
             "branch_horizon": int(args.branch_horizon),
             "diagnostic_horizon": int(args.diagnostic_horizon),
             "sequence_len": int(args.context_len + args.branch_horizon),
+            "replay_context_for_each_branch": True,
             "steer_min": float(args.steer_min),
             "steer_max": float(args.steer_max),
             "steer_bins": int(args.steer_bins),
