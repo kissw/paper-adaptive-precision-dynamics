@@ -19,11 +19,12 @@ Default smoke setting:
     samples/bin      = 3
     branches/anchor  = 24
     context_len      = 40
-    branch_horizon   = 10
-    diagnostic_horizon = 20
+    branch_horizon   = 20
+    diagnostic_horizon = 30
+    cf_hold_steps    = 2   (cf_action applied for first N steps, then expert action)
 
 Stored training frames:
-    (5 + 5) anchors * 24 branches * (40 + 10) frames = 12,000 frames
+    (5 + 5) anchors * 24 branches * (40 + 20) frames = 14,400 frames
 
 Important convention
 --------------------
@@ -498,6 +499,7 @@ def collect_branch_with_context_replay(
     context_start_snapshot: WorldSnapshot,
     context_frames_nominal: list[dict[str, Any]],
     cf_action: np.ndarray,
+    cf_hold_steps: int,
     mode: str,
     obstacle_actors: list,
     image_size: int,
@@ -511,13 +513,15 @@ def collect_branch_with_context_replay(
     This is the critical fix over the old anchor-restore method.
 
     Old behavior:
-        restore anchor snapshot -> apply cf_action
+        restore anchor snapshot -> apply cf_action for all branch steps
 
     New behavior:
-        restore context-start snapshot -> replay the same context actions -> apply cf_action
+        restore context-start snapshot -> replay the same context actions
+        -> apply cf_action for cf_hold_steps, then revert to anchor expert action
 
     Replaying the context lets CARLA rebuild wheel/vehicle internal dynamics before
-    the counterfactual branch, which makes branch responses more consistent.
+    the counterfactual branch. The short hold + expert-return pattern avoids
+    off-road divergence that occurred with fixed-steer holds over long horizons.
     """
     restore_world_snapshot(env, context_start_snapshot)
 
@@ -608,8 +612,10 @@ def collect_branch_with_context_replay(
     collision_diag = False
     lane_invasion_diag = False
 
+    nominal_act = np.asarray(branch_anchor_snapshot.anchor_expert_action, dtype=np.float32)
     for h in range(diagnostic_horizon):
-        obs, info = env.step(cf_action)
+        applied_action = cf_action if h < cf_hold_steps else nominal_act
+        obs, info = env.step(applied_action)
         img, state = obs
         meta = compute_meta_for_mode(
             mode=mode,
@@ -632,7 +638,7 @@ def collect_branch_with_context_replay(
                 make_frame(
                     image=img,
                     state=state,
-                    action=cf_action,
+                    action=applied_action,
                     expert_action=branch_anchor_snapshot.anchor_expert_action,
                     lane_id=lane_id,
                     lateral_dev=lat_dev,
@@ -920,6 +926,7 @@ def collect_mode(
                                 context_start_snapshot=context_start_snapshot,
                                 context_frames_nominal=context_frames,
                                 cf_action=cf_action,
+                                cf_hold_steps=args.cf_hold_steps,
                                 mode=mode,
                                 obstacle_actors=obstacle_actors,
                                 image_size=args.image_size,
@@ -1011,8 +1018,12 @@ def main() -> None:
     parser.add_argument("--clean_anchors", type=int, default=5)
     parser.add_argument("--obstacle_anchors", type=int, default=5)
     parser.add_argument("--context_len", type=int, default=40)
-    parser.add_argument("--branch_horizon", type=int, default=10)
-    parser.add_argument("--diagnostic_horizon", type=int, default=20)
+    parser.add_argument("--branch_horizon", type=int, default=20)
+    parser.add_argument("--diagnostic_horizon", type=int, default=30)
+    parser.add_argument(
+        "--cf_hold_steps", type=int, default=2,
+        help="cf_action을 유지할 step 수. 이후 anchor expert action으로 복귀",
+    )
     parser.add_argument("--steer_min", type=float, default=-0.2)
     parser.add_argument("--steer_max", type=float, default=0.2)
     parser.add_argument("--steer_bins", type=int, default=8)
@@ -1116,6 +1127,7 @@ def main() -> None:
             "context_len": int(args.context_len),
             "branch_horizon": int(args.branch_horizon),
             "diagnostic_horizon": int(args.diagnostic_horizon),
+            "cf_hold_steps": int(args.cf_hold_steps),
             "sequence_len": int(args.context_len + args.branch_horizon),
             "replay_context_for_each_branch": True,
             "steer_min": float(args.steer_min),
