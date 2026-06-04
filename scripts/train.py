@@ -92,6 +92,9 @@ def build_checkpoint(
         "data_path": getattr(args, "data", None),
         "valid_data_path": getattr(args, "valid_data", None),
         "output_dir": getattr(args, "output_dir", None),
+        "save_interval": getattr(args, "save_interval", None),
+        "early_stop_patience": getattr(args, "early_stop_patience", None),
+        "early_stop_min_delta": getattr(args, "early_stop_min_delta", None),
         "checkpoint_type": checkpoint_type,
         "is_best": bool(is_best),
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -226,7 +229,44 @@ def main():
     parser.add_argument("--output_dir", default="outputs/train")
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from")
     parser.add_argument("--start_epoch", type=int, default=0, help="Starting epoch number")
+
+    parser.add_argument(
+        "--save_interval",
+        "--save-interval",
+        type=int,
+        default=1,
+        help=(
+            "Save numbered epoch checkpoints every N epochs. "
+            "1 saves every epoch, 10 saves epoch_10.pt/epoch_20.pt/... . "
+            "0 disables periodic epoch checkpoint saving. best.pt and final.pt are always saved."
+        ),
+    )
+    parser.add_argument(
+        "--early_stop_patience",
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help=(
+            "Early-stop patience in epochs. "
+            "0 disables early stopping. Uses validation loss when --valid_data is provided, otherwise train loss."
+        ),
+    )
+    parser.add_argument(
+        "--early_stop_min_delta",
+        "--early-stop-min-delta",
+        type=float,
+        default=0.0,
+        help="Minimum loss decrease required to reset early-stop patience.",
+    )
+
     args = parser.parse_args()
+
+    if args.save_interval < 0:
+        raise ValueError("--save_interval must be >= 0")
+    if args.early_stop_patience < 0:
+        raise ValueError("--early_stop_patience must be >= 0")
+    if args.early_stop_min_delta < 0:
+        raise ValueError("--early_stop_min_delta must be >= 0")
 
     cfg = Config.from_yaml(args.config)
     if args.epochs:
@@ -288,12 +328,30 @@ def main():
     global_step = start_epoch * len(dataloader)
     best_loss = float("inf")
     best_epoch: int | None = None
+    epochs_without_improvement = 0
+    stopped_early = False
+
     epoch_losses: list[float] = []
     mean_loss: float = 0.0
     last_val_loss: float | None = None
+    completed_epoch = start_epoch
+
+    print("=" * 100)
+    print("Training configuration")
+    print(f"data: {data_path}")
+    print(f"valid_data: {args.valid_data}")
+    print(f"epochs: {cfg.training.epochs}")
+    print(f"batch_size: {cfg.training.batch_size}")
+    print(f"seq_len: {cfg.training.seq_len}")
+    print(f"batches_per_epoch: {len(dataloader)}")
+    print(f"save_interval: {args.save_interval}")
+    print(f"early_stop_patience: {args.early_stop_patience}")
+    print(f"early_stop_min_delta: {args.early_stop_min_delta}")
+    print("=" * 100)
 
     for epoch in range(start_epoch, cfg.training.epochs):
         epoch_losses = []
+        completed_epoch = epoch + 1
 
         for batch_idx, batch in enumerate(
             tqdm(dataloader, desc=f"Epoch {epoch + 1}/{cfg.training.epochs}", leave=False)
@@ -345,9 +403,16 @@ def main():
 
         selection_loss = last_val_loss if valid_loader is not None else mean_loss
 
-        if selection_loss < best_loss:
-            best_loss = selection_loss
+        improved = False
+        if selection_loss is not None:
+            loss_tensor = torch.tensor(selection_loss)
+            if not torch.isnan(loss_tensor) and not torch.isinf(loss_tensor):
+                improved = selection_loss < (best_loss - args.early_stop_min_delta)
+
+        if improved:
+            best_loss = float(selection_loss)
             best_epoch = epoch + 1
+            epochs_without_improvement = 0
             torch.save(
                 build_checkpoint(
                     agent, cfg, args,
@@ -362,21 +427,44 @@ def main():
                 ),
                 str(ckpt_dir / "best.pt"),
             )
+            print(f"  New best checkpoint saved: epoch={best_epoch}, loss={best_loss:.6f}")
+        else:
+            epochs_without_improvement += 1
+            if best_loss < float("inf"):
+                print(
+                    f"  No improvement for {epochs_without_improvement} epoch(s) "
+                    f"(best epoch={best_epoch}, best loss={best_loss:.6f})"
+                )
+            else:
+                print(f"  No valid best loss yet. No-improvement count={epochs_without_improvement}")
 
-        torch.save(
-            build_checkpoint(
-                agent, cfg, args,
-                epoch=epoch + 1,
-                global_step=global_step,
-                train_loss=mean_loss,
-                val_loss=last_val_loss,
-                best_epoch=best_epoch,
-                best_loss=best_loss,
-                checkpoint_type="epoch",
-                is_best=(selection_loss == best_loss),
-            ),
-            str(ckpt_dir / f"epoch_{epoch + 1}.pt"),
+        early_stop_triggered = (
+            args.early_stop_patience > 0
+            and epochs_without_improvement >= args.early_stop_patience
+            and best_loss < float("inf")
         )
+
+        should_save_epoch = (
+            args.save_interval > 0
+            and ((epoch + 1) % args.save_interval == 0)
+        ) or early_stop_triggered
+
+        if should_save_epoch:
+            torch.save(
+                build_checkpoint(
+                    agent, cfg, args,
+                    epoch=epoch + 1,
+                    global_step=global_step,
+                    train_loss=mean_loss,
+                    val_loss=last_val_loss,
+                    best_epoch=best_epoch,
+                    best_loss=best_loss if best_loss < float("inf") else None,
+                    checkpoint_type="epoch",
+                    is_best=improved,
+                ),
+                str(ckpt_dir / f"epoch_{epoch + 1}.pt"),
+            )
+            print(f"  Epoch checkpoint saved: {ckpt_dir / f'epoch_{epoch + 1}.pt'}")
 
         # --- GMM preference update ---
         pref_cfg = cfg.preference
@@ -408,22 +496,38 @@ def main():
             else:
                 print("  No valid preference sequences found (need success_flags in HDF5)")
 
+        if early_stop_triggered:
+            stopped_early = True
+            print("=" * 100)
+            print(
+                "Early stopping triggered: "
+                f"patience={args.early_stop_patience}, "
+                f"min_delta={args.early_stop_min_delta}, "
+                f"best_epoch={best_epoch}, "
+                f"best_loss={best_loss:.6f}, "
+                f"stop_epoch={epoch + 1}"
+            )
+            print("=" * 100)
+            break
+
     torch.save(
         build_checkpoint(
             agent, cfg, args,
-            epoch=cfg.training.epochs,
+            epoch=completed_epoch,
             global_step=global_step,
             train_loss=mean_loss if epoch_losses else None,
             val_loss=last_val_loss,
             best_epoch=best_epoch,
             best_loss=best_loss if best_loss < float("inf") else None,
-            checkpoint_type="final",
+            checkpoint_type="final_early_stop" if stopped_early else "final",
             is_best=False,
         ),
         str(ckpt_dir / "final.pt"),
     )
     writer.close()
     print(f"Training complete. Checkpoints in {ckpt_dir}")
+    if stopped_early:
+        print(f"Stopped early at epoch {completed_epoch}. Best checkpoint: {ckpt_dir / 'best.pt'}")
 
 
 if __name__ == "__main__":
