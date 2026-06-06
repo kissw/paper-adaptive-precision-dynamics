@@ -52,3 +52,24 @@ def compute_vfe(
         "kl_rep": rep_loss,
         "kl_per_dim": kl_per_dim,
     }
+
+
+def compute_overshoot_kl(
+    prior_mean: Tensor,
+    prior_std: Tensor,
+    target_mean: Tensor,
+    target_std: Tensor,
+    free_nats: float = 1.0,
+) -> Tensor:
+    """KL(sg_posterior_target ‖ imagined_prior) — dynamics direction.
+
+    Trains the multi-step open-loop prior toward the observed posterior,
+    reducing accumulated error in long-horizon rollouts.
+
+    target_* must be stop-gradient (called from the no-grad reference pass).
+    """
+    kl = kl_divergence(
+        Normal(target_mean, target_std),
+        Normal(prior_mean, prior_std),
+    ).sum(-1).mean()
+    return torch.clamp(kl, min=free_nats)

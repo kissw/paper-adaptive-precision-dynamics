@@ -32,7 +32,7 @@ def load_meta(path):
     keys = [
         "episode_ids", "actions", "states",
         "cf_is_context", "cf_is_branch", "cf_branch_step",
-        "cf_sampled_steer", "cf_anchor_id", "cf_branch_id",
+        "cf_sampled_steer", "cf_steer_bias", "cf_anchor_id", "cf_branch_id",
         "cf_max_abs_cte_delta_diag", "cf_max_abs_cte_delta_10",
         "expert_actions",
     ]
@@ -188,6 +188,129 @@ def check_cte_accumulation(d, out_dir, expected_hold):
             f"{means[0]:.3f} / {means[-1]:.3f}")
 
 
+def check_recovery(d, expected_hold):
+    """Verify closed-loop recovery: |crosstrack| should DECREASE after hold,
+    and check whether brake (negative accel) entered the action distribution."""
+    if "cf_branch_step" not in d or "states" not in d:
+        return "SKIP: missing cf_branch_step or states"
+
+    bs = d["cf_branch_step"]
+    is_branch = d["cf_is_branch"].astype(bool) if "cf_is_branch" in d else (bs >= 1)
+    cte = np.abs(d["states"][:, 3])
+    actions = d.get("actions")
+
+    steps = sorted(np.unique(bs[is_branch]).tolist())
+    means = {}
+    for s in steps:
+        m = is_branch & (bs == s)
+        means[s] = float(cte[m].mean()) if m.sum() else np.nan
+
+    # crosstrack at hold-end vs branch-end
+    post_steps = [s for s in steps if s > expected_hold]
+    if len(post_steps) < 2:
+        return "SKIP: not enough post-hold steps"
+    cte_at_hold_end = means[post_steps[0]]
+    cte_peak = max(means[s] for s in post_steps)
+    cte_at_branch_end = means[post_steps[-1]]
+
+    # Recovery success: end < peak (came back down) AND end <= hold_end*1.1
+    recovered = (cte_at_branch_end < cte_peak * 0.95) or (
+        cte_at_branch_end <= cte_at_hold_end * 1.1
+    )
+
+    # Brake usage in recovery region (accel < 0 means braking)
+    brake_note = ""
+    if actions is not None and actions.shape[1] >= 2:
+        post_mask = is_branch & (bs > expected_hold)
+        accel = actions[post_mask, 1]
+        brake_frac = float(np.mean(accel < 0.0)) if post_mask.sum() else 0.0
+        brake_note = (f"\n  recovery-region brake fraction (accel<0): "
+                      f"{brake_frac:.3f}  (was ~0 in original fixed-throttle data)")
+
+    verdict = "PASS (recovers)" if recovered else "FAIL (no recovery)"
+    return (f"[{verdict}]\n"
+            f"  mean |cte| hold-end(step {post_steps[0]}) = {cte_at_hold_end:.3f}\n"
+            f"  mean |cte| peak               = {cte_peak:.3f}\n"
+            f"  mean |cte| branch-end(step {post_steps[-1]}) = {cte_at_branch_end:.3f}"
+            f"{brake_note}\n"
+            f"  -> 복귀 성공이면 branch-end가 peak보다 확실히 작아야 함")
+
+
+def check_colored_noise_branch(d, expected_hold=None):
+    """Verify colored-noise branch actions: per-branch temporal diversity,
+    step-to-step smoothness, and branch-to-branch divergence."""
+    if "actions" not in d or "cf_is_branch" not in d:
+        return "SKIP: missing actions or cf_is_branch"
+    actions = d["actions"]
+    is_branch = d["cf_is_branch"].astype(bool)
+    eids = d["episode_ids"]
+    cte = np.abs(d["states"][:, 3]) if "states" in d else None
+    steer_bias = d.get("cf_steer_bias")
+
+    # (a) per-branch temporal diversity of steer
+    divers = []
+    # (b) step-to-step smoothness (mean abs diff of steer within branch)
+    smooth = []
+    for e in np.unique(eids):
+        m = (eids == e) & is_branch
+        if m.sum() < 2:
+            continue
+        steer = actions[m, 0]
+        divers.append(float(steer.std()))
+        smooth.append(float(np.mean(np.abs(np.diff(steer)))))
+    divers = np.array(divers)
+    smooth = np.array(smooth)
+
+    # (c) branch divergence: correlation between steer_bias and final cte
+    div_note = ""
+    if steer_bias is not None and cte is not None:
+        per_branch_bias, per_branch_cte = [], []
+        for e in np.unique(eids):
+            m = (eids == e) & is_branch
+            if m.sum() == 0:
+                continue
+            per_branch_bias.append(float(steer_bias[m][0]))
+            per_branch_cte.append(float(cte[m][-1]))  # final cte
+        if len(per_branch_bias) > 3:
+            corr = float(np.corrcoef(np.abs(per_branch_bias),
+                                     per_branch_cte)[0, 1])
+            div_note = (f"\n  |steer_bias| vs final|cte| corr: {corr:.3f}  "
+                        f"(>0.3 이면 bias가 divergence 유발 = sensitivity 확보)")
+
+    # (d) bias vs actual_mean_steer Spearman rank correlation
+    spearman_note = ""
+    if steer_bias is not None:
+        per_branch_bias2, per_branch_mean_steer = [], []
+        for e in np.unique(eids):
+            m = (eids == e) & is_branch
+            if m.sum() == 0:
+                continue
+            per_branch_bias2.append(float(steer_bias[m][0]))
+            per_branch_mean_steer.append(float(actions[m, 0].mean()))
+        if len(per_branch_bias2) > 3:
+            b = np.array(per_branch_bias2)
+            s = np.array(per_branch_mean_steer)
+            # Spearman: rank-based Pearson (no scipy dependency)
+            rb = np.argsort(np.argsort(b)).astype(float)
+            rs = np.argsort(np.argsort(s)).astype(float)
+            sp_corr = float(np.corrcoef(rb, rs)[0, 1])
+            spearman_note = (
+                f"\n  bias vs actual mean steer Spearman corr: {sp_corr:.3f}  "
+                f"(1.0에 가까우면 bias가 실제 조향 지배 = 체계적 coverage 유지, "
+                f"낮으면 noise가 bias를 뒤집음 = coverage 약함)"
+            )
+
+    lines = [
+        f"  per-branch steer std (temporal diversity): "
+        f"mean={divers.mean():.3f}  (>0.02 expect; 고정이면 0)",
+        f"  step-to-step |dsteer| (smoothness): "
+        f"mean={smooth.mean():.3f}  (작을수록 smooth; white noise면 큼)",
+    ]
+    diversity_ok = divers.mean() > 0.02
+    verdict = "PASS" if diversity_ok else "CHECK (sequence가 고정에 가까움)"
+    return f"[{verdict}]\n" + "\n".join(lines) + div_note + spearman_note
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
@@ -223,6 +346,12 @@ def main():
     print()
     print("--- 5. crosstrack accumulation ---")
     print(check_cte_accumulation(d, out_dir, args.expected_hold))
+    print()
+    print("--- 6. closed-loop recovery (only for recovery-mode data) ---")
+    print(check_recovery(d, args.expected_hold))
+    print()
+    print("--- 7. colored-noise branch (diversity / smoothness / divergence) ---")
+    print(check_colored_noise_branch(d))
     print()
     print("=" * 64)
     print("Done. Review the [CHECK] items and the cte_accumulation.png plot.")

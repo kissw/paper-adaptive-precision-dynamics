@@ -13,7 +13,7 @@ from active_inference.models.rssm import RSSM, RSSMState
 from active_inference.models.ensemble import EnsembleTransitionHeads
 from active_inference.planning.cem_planner import iCEMPlanner, PlanResult
 from active_inference.planning.efe import EFEScorer
-from active_inference.training.losses import compute_vfe
+from active_inference.training.losses import compute_overshoot_kl, compute_vfe
 from active_inference.training.preference import PreferenceModel
 from active_inference.utils.transforms import crop_road as _crop_road
 
@@ -285,13 +285,35 @@ class DeepAIFAgent:
         cfg = self._cfg.training
         beta_obstacle_aux = getattr(cfg, "beta_obstacle_aux", 0.0)
 
+        overshoot_horizon = getattr(cfg, "overshoot_horizon", 0)
+        overshoot_weight = getattr(cfg, "overshoot_weight", 0.0)
+
         self._optimizer.zero_grad()
         total_loss_value = 0.0
         accum = {
             "img_loss": 0.0, "state_loss": 0.0,
             "kl_dyn": 0.0, "kl_rep": 0.0, "obs_aux_loss": 0.0,
+            "overshoot_kl": 0.0,
         }
 
+        # ── 1st pass: collect stop-grad posterior references for overshooting ──
+        # Runs encoder + obs_step once under no_grad to build the target list.
+        # posteriors_ref[t].mean/.std are used as fixed KL targets in 2nd pass.
+        posteriors_ref: list[RSSMState] = []
+        if overshoot_horizon > 0 and overshoot_weight > 0.0:
+            prev_s = wm.rssm.initial(B, self._device)
+            with torch.no_grad():
+                with torch.amp.autocast("cuda", enabled=self._use_amp):
+                    for t in range(T):
+                        img_ref = wm.preprocess_image(images[:, t].to(self._device))
+                        st_ref = states[:, t].to(self._device)
+                        act_ref = actions[:, t].to(self._device)
+                        emb_ref = wm.encoder(img_ref, st_ref)
+                        post_ref, _ = wm.rssm.obs_step(prev_s, act_ref, emb_ref)
+                        posteriors_ref.append(post_ref)
+                        prev_s = type(post_ref)(*[x.detach() for x in post_ref])
+
+        # ── 2nd pass: main training loop ──────────────────────────────────────
         # Dataset convention used by the v5 collectors:
         #   action[t] is the action applied by env.step(action[t]) that produced
         #   image[t], state[t]. Therefore obs_step at timestep t must be
@@ -344,6 +366,25 @@ class DeepAIFAgent:
                     loss = loss + beta_obstacle_aux * obs_aux
                     obs_aux_loss_val = obs_aux.item()
 
+                # Latent overshooting: D-step prior rollout vs stop-grad posteriors
+                osh_kl_val = 0.0
+                if posteriors_ref and t + 1 < T:
+                    n_steps = min(overshoot_horizon, T - 1 - t)
+                    state_d = post
+                    osh_kl = torch.zeros((), device=self._device)
+                    for d in range(1, n_steps + 1):
+                        act_td = actions[:, t + d].to(self._device)
+                        state_d = wm.rssm.img_step(state_d, act_td)
+                        ref = posteriors_ref[t + d]
+                        osh_kl = osh_kl + compute_overshoot_kl(
+                            state_d.mean, state_d.std,
+                            ref.mean, ref.std,
+                            free_nats=cfg.free_nats,
+                        )
+                    osh_kl = osh_kl / n_steps
+                    loss = loss + overshoot_weight * osh_kl
+                    osh_kl_val = osh_kl.item()
+
             # NaN guard: skip this timestep if loss is bad
             if torch.isnan(loss) or torch.isinf(loss):
                 prev_state = type(post)(
@@ -361,6 +402,7 @@ class DeepAIFAgent:
             for k in ["img_loss", "state_loss", "kl_dyn", "kl_rep"]:
                 accum[k] += info[k].item()
             accum["obs_aux_loss"] += obs_aux_loss_val
+            accum["overshoot_kl"] += osh_kl_val
 
             prev_state = type(post)(
                 *[x.detach() for x in post],

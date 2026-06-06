@@ -21,7 +21,6 @@ Default smoke setting:
     context_len      = 40
     branch_horizon   = 20
     diagnostic_horizon = 30
-    cf_hold_steps    = 2   (cf_action applied for first N steps, then expert action)
 
 Stored training frames:
     (5 + 5) anchors * 24 branches * (40 + 20) frames = 14,400 frames
@@ -45,6 +44,9 @@ from typing import Any
 
 import h5py
 import numpy as np
+import torch
+
+from active_inference.planning.cem_planner import colored_noise
 
 
 def _clear_queue(q: queue.Queue) -> None:
@@ -323,7 +325,7 @@ class H5Accumulator:
             "cf_branch_lane_invasion_diag", "cf_final_abs_cte_delta_10",
             "cf_final_abs_cte_delta_diag", "cf_max_abs_cte_delta_10",
             "cf_max_abs_cte_delta_diag", "cf_step_collision",
-            "cf_step_lane_invasion", "cf_source_type",
+            "cf_step_lane_invasion", "cf_source_type", "cf_steer_bias",
         ]}
 
     def append_sequence(
@@ -334,6 +336,7 @@ class H5Accumulator:
         branch_id: int,
         bin_id: int,
         sampled_steer: float,
+        steer_bias: float,
         context_frames: list[dict[str, Any]],
         branch_frames: list[dict[str, Any]],
         task_label: int,
@@ -409,6 +412,7 @@ class H5Accumulator:
             d["cf_step_collision"].append(bool(fr["step_collision"]))
             d["cf_step_lane_invasion"].append(bool(fr["step_lane_invasion"]))
             d["cf_source_type"].append(int(task_label))
+            d["cf_steer_bias"].append(float(steer_bias))
 
     def write(self, path: str | Path, attrs: dict[str, Any]) -> None:
         path = Path(path)
@@ -453,6 +457,7 @@ class H5Accumulator:
                 "cf_final_abs_cte_delta_10", "cf_final_abs_cte_delta_diag",
                 "cf_max_abs_cte_delta_10", "cf_max_abs_cte_delta_diag",
                 "cf_step_collision", "cf_step_lane_invasion", "cf_source_type",
+                "cf_steer_bias",
             ]:
                 values = d[key]
                 if key.startswith("cf_is") or key.startswith("cf_branch_collision") or key.startswith("cf_branch_lane") or key.startswith("cf_step") or key in ["is_counterfactual", "cf_anchor_obstacle_visible"]:
@@ -499,7 +504,9 @@ def collect_branch_with_context_replay(
     context_start_snapshot: WorldSnapshot,
     context_frames_nominal: list[dict[str, Any]],
     cf_action: np.ndarray,
-    cf_hold_steps: int,
+    noise_beta: float,
+    noise_scale_steer: float,
+    noise_scale_accel: float,
     mode: str,
     obstacle_actors: list,
     image_size: int,
@@ -510,18 +517,14 @@ def collect_branch_with_context_replay(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], AnchorSnapshot | None]:
     """Replay context from a pre-context snapshot, then collect one CF branch.
 
-    This is the critical fix over the old anchor-restore method.
-
-    Old behavior:
-        restore anchor snapshot -> apply cf_action for all branch steps
-
-    New behavior:
-        restore context-start snapshot -> replay the same context actions
-        -> apply cf_action for cf_hold_steps, then revert to anchor expert action
-
-    Replaying the context lets CARLA rebuild wheel/vehicle internal dynamics before
-    the counterfactual branch. The short hold + expert-return pattern avoids
-    off-road divergence that occurred with fixed-steer holds over long horizons.
+    Branch rollout phases
+    ---------------------
+    1. Context replay : restore context-start snapshot, replay recorded actions.
+    2. Branch rollout : apply steer_bias + colored-noise action sequence.
+                        steer_bias = cf_action[0] (sampled bin steer) → branch-to-branch
+                        divergence guaranteed.
+                        colored noise (beta=noise_beta) → smooth within-sequence variation
+                        → RSSM sees action dynamics, not a fixed hold.
     """
     restore_world_snapshot(env, context_start_snapshot)
 
@@ -612,9 +615,25 @@ def collect_branch_with_context_replay(
     collision_diag = False
     lane_invasion_diag = False
 
-    nominal_act = np.asarray(branch_anchor_snapshot.anchor_expert_action, dtype=np.float32)
+    steer_bias = float(cf_action[0])
+    nominal_accel = float(anchor_frame["expert_action"][1])
+
+    noise_raw = colored_noise(
+        (1, diagnostic_horizon, 2), beta=noise_beta
+    )[0]  # (diagnostic_horizon, 2) tensor
+    noise_scale = torch.tensor([noise_scale_steer, noise_scale_accel])
+    noise = noise_raw * noise_scale  # (diagnostic_horizon, 2)
+
+    branch_actions: list[np.ndarray] = []
     for h in range(diagnostic_horizon):
-        applied_action = cf_action if h < cf_hold_steps else nominal_act
+        steer = steer_bias + float(noise[h, 0])
+        accel = nominal_accel + float(noise[h, 1])
+        a = np.array([steer, accel], dtype=np.float32)
+        a = np.clip(a, [-1.0, 0.0], [1.0, 1.0])
+        branch_actions.append(a)
+
+    for h in range(diagnostic_horizon):
+        applied_action = branch_actions[h]
         obs, info = env.step(applied_action)
         img, state = obs
         meta = compute_meta_for_mode(
@@ -926,7 +945,9 @@ def collect_mode(
                                 context_start_snapshot=context_start_snapshot,
                                 context_frames_nominal=context_frames,
                                 cf_action=cf_action,
-                                cf_hold_steps=args.cf_hold_steps,
+                                noise_beta=args.noise_beta,
+                                noise_scale_steer=args.noise_scale_steer,
+                                noise_scale_accel=args.noise_scale_accel,
                                 mode=mode,
                                 obstacle_actors=obstacle_actors,
                                 image_size=args.image_size,
@@ -948,6 +969,7 @@ def collect_mode(
                             branch_id=global_branch_id,
                             bin_id=bin_id,
                             sampled_steer=steer,
+                            steer_bias=steer,
                             context_frames=replayed_context_frames,
                             branch_frames=branch_frames,
                             task_label=0 if mode == "clean" else 1,
@@ -1021,8 +1043,16 @@ def main() -> None:
     parser.add_argument("--branch_horizon", type=int, default=20)
     parser.add_argument("--diagnostic_horizon", type=int, default=30)
     parser.add_argument(
-        "--cf_hold_steps", type=int, default=2,
-        help="cf_action을 유지할 step 수. 이후 anchor expert action으로 복귀",
+        "--noise_beta", type=float, default=1.0,
+        help="Colored-noise spectral exponent (1.0=pink noise). iCEM default.",
+    )
+    parser.add_argument(
+        "--noise_scale_steer", type=float, default=0.10,
+        help="Std of within-branch steer noise around steer_bias.",
+    )
+    parser.add_argument(
+        "--noise_scale_accel", type=float, default=0.02,
+        help="Std of within-branch accel noise around nominal accel.",
     )
     parser.add_argument("--steer_min", type=float, default=-0.2)
     parser.add_argument("--steer_max", type=float, default=0.2)
@@ -1074,6 +1104,8 @@ def main() -> None:
         print(f"context_len: {args.context_len}")
         print(f"branch_horizon: {args.branch_horizon}")
         print(f"diagnostic_horizon: {args.diagnostic_horizon}")
+        print(f"noise_beta: {args.noise_beta}")
+        print(f"noise_scale: steer={args.noise_scale_steer} accel={args.noise_scale_accel}")
         print("replay_context_for_each_branch: True")
         print(f"steer range: [{args.steer_min}, {args.steer_max}]")
         print(f"steer_bins: {args.steer_bins}")
@@ -1127,7 +1159,9 @@ def main() -> None:
             "context_len": int(args.context_len),
             "branch_horizon": int(args.branch_horizon),
             "diagnostic_horizon": int(args.diagnostic_horizon),
-            "cf_hold_steps": int(args.cf_hold_steps),
+            "noise_beta": float(args.noise_beta),
+            "noise_scale_steer": float(args.noise_scale_steer),
+            "noise_scale_accel": float(args.noise_scale_accel),
             "sequence_len": int(args.context_len + args.branch_horizon),
             "replay_context_for_each_branch": True,
             "steer_min": float(args.steer_min),

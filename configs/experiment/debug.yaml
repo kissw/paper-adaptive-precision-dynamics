@@ -25,6 +25,8 @@ training:
   kl_dyn_scale: 1.0
   kl_rep_scale: 0.1
   lr_warmup_steps: 10
+  overshoot_horizon: 2
+  overshoot_weight: 0.5
 
 ensemble:
   num_heads: 2

@@ -37,6 +37,8 @@ class TrainingConfig:
     kl_rep_scale: float = 0.1
     lr_warmup_steps: int = 1000
     beta_obstacle_aux: float = 0.0  # auxiliary obstacle prediction loss weight
+    overshoot_horizon: int = 0      # latent overshooting D; 0 = disabled
+    overshoot_weight: float = 0.0   # loss weight for overshoot KL term
 
 
 @dataclass
