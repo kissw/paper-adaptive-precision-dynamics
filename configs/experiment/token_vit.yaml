@@ -26,6 +26,7 @@ token_vit:
   image_size: 64
   patch_size: 8
   num_tokens: 64
+  use_action_warp: false      # A1: spatial warp of token grid by action flow
   embed_dim: 256
   deter_dim: 256
   stoch_dim: 64
@@ -72,6 +73,8 @@ preference:
   fit_iters: 300
   fit_lr: 0.005
   max_samples: 5000
+  token_wise: false   # A2: use token-wise contrastive preference in EFE
+  topk: 8             # A2: top-k token score aggregation
 
 efe:
   beta_instrumental: 1.0
@@ -89,6 +92,10 @@ training:
   kl_dyn_scale: 1.0
   kl_rep_scale: 0.5
   free_nats: 1.0
+  overshoot_horizon: 0      # baseline: 1-step KL only; override with --set to enable
+  overshoot_weight: 0.0
+  token_kl_weighting: "none"    # A3: "none"|"error"
+  warp_smoothness_weight: 0.0   # A1: flow TV regularization
 
 evaluation:
   episodes: 5

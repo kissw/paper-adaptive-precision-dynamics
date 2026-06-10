@@ -140,6 +140,8 @@ class EFEScorer:
         ensemble: EnsembleTransitionHeads,
         state_decoder=None,
         obstacle_info: dict | None = None,
+        trajectory_states: list | None = None,
+        topk: int = 8,
     ) -> Tensor:
         # trajectory_feats: list of [B, feat_dim], len=horizon
         # trajectory_means: list of [B, stoch_dim]
@@ -160,10 +162,28 @@ class EFEScorer:
             ref_image = obstacle_info.get("ref_image", None)
             obs_decoder = obstacle_info.get("obs_decoder", None)
 
+        # A2: detect token-wise preference model via duck typing
+        _is_token_pref = (
+            trajectory_states is not None
+            and hasattr(pref_model, "token_scores")
+        )
+
         for t, (feat, mean, std) in enumerate(
             zip(trajectory_feats, trajectory_means, trajectory_stds)
         ):
-            instr = self.instrumental_value(mean, std, pref_model)
+            if _is_token_pref:
+                # Token-wise contrastive preference: score per token then aggregate
+                state = trajectory_states[t]
+                if hasattr(state, "deter") and state.deter.ndim == 3:
+                    from active_inference.training.token_preference import (
+                        extract_token_features,
+                    )
+                    z_tokens = extract_token_features(state, "deter_stoch")
+                    instr = -pref_model.score_frames(z_tokens, topk=topk)
+                else:
+                    instr = self.instrumental_value(mean, std, pref_model)
+            else:
+                instr = self.instrumental_value(mean, std, pref_model)
             epist = self.epistemic_value_ensemble(ensemble, feat)
 
             # Per-timestep normalization: z-score across batch so relative

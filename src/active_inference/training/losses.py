@@ -18,14 +18,35 @@ def compute_vfe(
     free_nats: float = 1.0,
     kl_dyn_scale: float = 1.0,
     kl_rep_scale: float = 0.1,
+    token_kl_weighting: str = "none",
 ) -> tuple[Tensor, dict[str, Tensor]]:
+    """Compute Variational Free Energy.
+
+    token_kl_weighting — A3 token-weighted dynamics KL:
+      "none"  : standard mean (default, RSSM/ViT identical)
+      "error" : weight token KL by its own magnitude (error-feedback weighting).
+                Only active when post_mean is 3D (B, N, Z); falls back to "none"
+                for 2D RSSM states.
+    """
     post = Normal(post_mean, post_std)
     prior = Normal(prior_mean, prior_std)
 
     # Dual KL: dyn trains prior (post detached), rep trains posterior (prior detached).
     # .sum(-1) reduces the stochastic dim Z; .mean() then averages over all remaining
     # prefix dims (B for RSSM; B×N for token-level world models).  Both shapes work.
-    dyn_loss = kl_divergence(Normal(post_mean.detach(), post_std.detach()), prior).sum(-1).mean()
+    per_token_kl_dyn = kl_divergence(
+        Normal(post_mean.detach(), post_std.detach()), prior
+    ).sum(-1)  # (B,) for RSSM, (B, N) for ViT
+
+    if token_kl_weighting == "error" and post_mean.ndim == 3:
+        # Error-weighted: tokens with larger current KL get proportionally higher weight.
+        # Normalise per-sample so total weight == N (preserves magnitude).
+        w = per_token_kl_dyn.detach()
+        w = w / (w.mean(dim=1, keepdim=True) + 1e-8)
+        dyn_loss = (per_token_kl_dyn * w).mean()
+    else:
+        dyn_loss = per_token_kl_dyn.mean()
+
     rep_loss = kl_divergence(post, Normal(prior_mean.detach(), prior_std.detach())).sum(-1).mean()
 
     dyn_loss = torch.clamp(dyn_loss, min=free_nats)

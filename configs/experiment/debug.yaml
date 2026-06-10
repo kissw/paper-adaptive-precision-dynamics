@@ -25,8 +25,10 @@ training:
   kl_dyn_scale: 1.0
   kl_rep_scale: 0.1
   lr_warmup_steps: 10
-  overshoot_horizon: 2
-  overshoot_weight: 0.5
+  overshoot_horizon: 0
+  overshoot_weight: 0.0
+  token_kl_weighting: "none"
+  warp_smoothness_weight: 0.0
 
 ensemble:
   num_heads: 2

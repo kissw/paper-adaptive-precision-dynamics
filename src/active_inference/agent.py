@@ -77,6 +77,7 @@ class WorldModel(nn.Module):
                 num_heads=tv.num_heads,
                 mlp_ratio=tv.mlp_ratio,
                 min_std=tv.min_std,
+                use_action_warp=getattr(tv, "use_action_warp", False),
             )
             self.obs_decoder = TokenImageDecoder(
                 num_tokens=tv.num_tokens,
@@ -287,6 +288,8 @@ class DeepAIFAgent:
 
         overshoot_horizon = getattr(cfg, "overshoot_horizon", 0)
         overshoot_weight = getattr(cfg, "overshoot_weight", 0.0)
+        token_kl_weighting = getattr(cfg, "token_kl_weighting", "none")
+        warp_smoothness_weight = getattr(cfg, "warp_smoothness_weight", 0.0)
 
         self._optimizer.zero_grad()
         total_loss_value = 0.0
@@ -350,7 +353,13 @@ class DeepAIFAgent:
                     free_nats=cfg.free_nats,
                     kl_dyn_scale=cfg.kl_dyn_scale,
                     kl_rep_scale=cfg.kl_rep_scale,
+                    token_kl_weighting=token_kl_weighting,
                 )
+
+                # A1: warp smoothness regularization (set by last img_step call)
+                if warp_smoothness_weight > 0 and hasattr(wm.rssm, "warp_smoothness_loss"):
+                    smooth = wm.rssm.warp_smoothness_loss()
+                    loss = loss + warp_smoothness_weight * smooth
 
                 # Auxiliary obstacle prediction loss
                 obs_aux_loss_val = 0.0
@@ -366,7 +375,9 @@ class DeepAIFAgent:
                     loss = loss + beta_obstacle_aux * obs_aux
                     obs_aux_loss_val = obs_aux.item()
 
-                # Latent overshooting: D-step prior rollout vs stop-grad posteriors
+                # Latent overshooting: D-step prior rollout vs stop-grad posteriors.
+                # wm.get_kl_stats() dispatches to (B,Z) for RSSM or (B,N,Z) for ViT,
+                # so compute_overshoot_kl works for both model types.
                 osh_kl_val = 0.0
                 if posteriors_ref and t + 1 < T:
                     n_steps = min(overshoot_horizon, T - 1 - t)
@@ -377,8 +388,8 @@ class DeepAIFAgent:
                         state_d = wm.rssm.img_step(state_d, act_td)
                         ref = posteriors_ref[t + d]
                         osh_kl = osh_kl + compute_overshoot_kl(
-                            state_d.mean, state_d.std,
-                            ref.mean, ref.std,
+                            *wm.get_kl_stats(state_d),
+                            *wm.get_kl_stats(ref),
                             free_nats=cfg.free_nats,
                         )
                     osh_kl = osh_kl / n_steps

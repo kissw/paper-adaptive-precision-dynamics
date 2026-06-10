@@ -4,6 +4,14 @@ Spatial token dynamics are preserved end-to-end through the transition.
 The transition operates on a (B, N, D) token grid and never collapses
 tokens to a global vector internally.
 
+Spatial token order (verified):
+  Encoder: Conv2d(patch=8,stride=8) → (B,E,8,8) → flatten(2) → (B,E,64)
+           → transpose(1,2) → (B,64,E).
+  Token i maps to image patch at (row = i // 8, col = i % 8) — raster order.
+  Decoder: permute(0,2,1) → (B,E,64) → reshape(B,E,8,8) uses the same mapping.
+  ActionWarp (_apply_warp) follows the same permute+reshape convention so that
+  spatial flow displacements correspond to the correct image regions.
+
 State layout (TokenRSSMState — 6 fields):
 
   deter      : (B, N, D_deter)  — 3D token deterministic context
@@ -143,12 +151,15 @@ class TokenViTTransition(nn.Module):
         num_heads: int = 8,
         mlp_ratio: float = 4.0,
         min_std: float = 0.1,
+        use_action_warp: bool = False,
     ):
         super().__init__()
         self._N = num_tokens
         self._D = deter_dim
         self._Z = stoch_dim
         self._min_std = min_std
+        self._use_action_warp = use_action_warp
+        self._action_dim = action_dim
 
         # Positional embedding (shared across prior and posterior).
         self._pos_embed = nn.Parameter(
@@ -202,7 +213,95 @@ class TokenViTTransition(nn.Module):
         feat_dim = deter_dim + stoch_dim  # 320
         self._feat_adapter = nn.Linear(feat_dim * 2, feat_dim)
 
+        # A1: Action-warp modules (only created when use_action_warp=True)
+        if use_action_warp:
+            assert int(num_tokens ** 0.5) ** 2 == num_tokens, \
+                "use_action_warp requires num_tokens to be a perfect square"
+            self._grid_size = int(num_tokens ** 0.5)   # 8
+            self._flow_scale = 0.1                     # initial flow magnitude cap
+            # Global flow: single displacement applied to all tokens
+            self._warp_global = nn.Linear(action_dim, 2)
+            nn.init.zeros_(self._warp_global.weight)
+            nn.init.zeros_(self._warp_global.bias)
+            # Per-token residual flow
+            self._warp_residual = nn.Sequential(
+                nn.Linear(deter_dim + action_dim, deter_dim),
+                nn.SiLU(),
+                nn.Linear(deter_dim, 2),
+            )
+            nn.init.zeros_(self._warp_residual[-1].weight)
+            nn.init.zeros_(self._warp_residual[-1].bias)
+            self._warp_smooth_loss: Tensor | None = None
+
         nn.init.trunc_normal_(self._pos_embed, std=0.02)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # A1: Action warp helpers
+    # ------------------------------------------------------------------
+
+    def _make_base_grid(self, G: int, device: torch.device) -> Tensor:
+        """Return identity sampling grid (1, G, G, 2) for F.grid_sample.
+
+        Last dim order: (x = col direction, y = row direction),
+        values in [-1, 1] with align_corners=True convention.
+        """
+        lin = torch.linspace(-1, 1, G, device=device)
+        gy, gx = torch.meshgrid(lin, lin, indexing="ij")  # (G, G) each
+        base = torch.stack([gx, gy], dim=-1)              # (G, G, 2): (col, row)
+        return base.unsqueeze(0)                           # (1, G, G, 2)
+
+    def _apply_warp(self, x: Tensor, action: Tensor) -> Tensor:
+        """Warp token grid by action-conditioned flow field.
+
+        Follows the same (B,N,D) ↔ (B,D,G,G) convention as the decoder:
+          permute(0,2,1).reshape(B,D,G,G)  →  grid_sample  →  reshape+permute back.
+
+        Flow channels: (dx_col, dy_row) matching grid_sample's (x, y) order.
+        """
+        B, N, D = x.shape
+        G = self._grid_size
+
+        # (B, N, D) → (B, D, G, G): decoder-compatible reshape
+        grid_feat = x.permute(0, 2, 1).reshape(B, D, G, G)
+
+        # Global flow: same (dx, dy) for all tokens
+        gflow = self._warp_global(action)                    # (B, 2)
+
+        # Per-token residual: (B, N, D+action_dim) → (B, N, 2)
+        act_exp = action.unsqueeze(1).expand(B, N, -1)       # (B, N, action_dim)
+        rflow = self._warp_residual(
+            torch.cat([x, act_exp], dim=-1)
+        )                                                     # (B, N, 2)
+
+        flow = gflow.unsqueeze(1) + rflow                    # (B, N, 2)
+        flow_2d = flow.reshape(B, G, G, 2)                   # (B, G, G, 2)
+
+        # Sampling grid: identity + scaled flow
+        base = self._make_base_grid(G, x.device)             # (1, G, G, 2)
+        samp = base + flow_2d * self._flow_scale             # (B, G, G, 2)
+
+        warped = F.grid_sample(
+            grid_feat, samp,
+            align_corners=True, padding_mode="border",
+        )                                                     # (B, D, G, G)
+
+        # Store smoothness loss (with grad) before returning
+        diff_h = (flow_2d[:, 1:] - flow_2d[:, :-1]).pow(2).mean()
+        diff_w = (flow_2d[:, :, 1:] - flow_2d[:, :, :-1]).pow(2).mean()
+        self._warp_smooth_loss = diff_h + diff_w
+
+        # (B, D, G, G) → (B, N, D): reverse the reshape
+        return warped.reshape(B, D, N).permute(0, 2, 1)
+
+    def warp_smoothness_loss(self) -> Tensor:
+        """Return TV-L2 flow smoothness penalty from the last img_step call."""
+        if not self._use_action_warp or self._warp_smooth_loss is None:
+            return torch.zeros((), device=next(self.parameters()).device)
+        return self._warp_smooth_loss
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -277,6 +376,13 @@ class TokenViTTransition(nn.Module):
         x = self._in_proj(
             torch.cat([prev_state.deter, prev_state.stoch], dim=-1)
         )                                                          # (B, N, D)
+
+        # A1: Warp token grid by action flow BEFORE positional embedding.
+        # This spatially displaces tokens according to the predicted ego motion,
+        # so the prior "looks ahead" in image space before self-attention.
+        if self._use_action_warp:
+            x = self._apply_warp(x, prev_action)
+
         x = x + self._pos_embed                                    # (B, N, D)
 
         # Broadcast action embedding to every token.

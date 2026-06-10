@@ -174,10 +174,16 @@ def imagine_from_states(
 
     Returns list of N RSSMState objects, each h steps ahead.
     """
-    action_dim = wm.rssm._img_in[0].in_features  # stoch+action_dim
-    # Derive action_dim: img_in expects (stoch_dim + action_dim) input
-    stoch_dim = initial_states[0].stoch.shape[-1]
-    action_dim_actual = wm.rssm._img_in[0].in_features - stoch_dim
+    # Derive action_dim robustly for both RSSM and TokenViT.
+    # TokenViT stores _action_dim directly; RSSM derives it from _img_in.
+    rssm = wm.rssm
+    if hasattr(rssm, "_action_dim"):
+        action_dim_actual = rssm._action_dim
+    elif hasattr(rssm, "_img_in") and hasattr(rssm, "_stoch_dim"):
+        action_dim_actual = rssm._img_in[0].in_features - rssm._stoch_dim
+    else:
+        # Final fallback: infer from initial state stoch shape (works for RSSM)
+        action_dim_actual = rssm._img_in[0].in_features - initial_states[0].stoch.shape[-1]
 
     final_states = []
     for idx, init_state in enumerate(initial_states):
@@ -277,8 +283,13 @@ def compute_pp_gap(
 # Build world model from checkpoint
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_world_model(cfg_path: str, ckpt_path: str, device: torch.device) -> tuple:
-    cfg = Config.from_yaml(cfg_path)
+def build_world_model(
+    cfg_path: str,
+    ckpt_path: str,
+    device: torch.device,
+    overrides: list[str] | None = None,
+) -> tuple:
+    cfg = Config.from_yaml(cfg_path, overrides=overrides or None)
     wm = WorldModel(cfg).to(device)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     wm.load_state_dict(ckpt["world_model"], strict=True)
@@ -334,12 +345,34 @@ def main():
     parser.add_argument("--eval_data",
         default="data/obstacle_visible_eval_v5.h5",
         help="HDF5 with groups 'clean' and 'obstacle_visible'")
+    # ── Unified config / overrides (same pattern as train.py) ──────────────
+    parser.add_argument(
+        "--config", default=None,
+        help="Unified config path for all checkpoints. When set, overrides "
+             "--rssm_config / --tokenvit_config. Use with --set to match the "
+             "exact model variant (RSSM / ViT / ViT+warp) that was trained.",
+    )
+    parser.add_argument(
+        "--set", nargs="*", default=[],
+        metavar="KEY=VALUE",
+        help="OmegaConf dotlist overrides applied after --config. "
+             "예: token_vit.use_action_warp=true",
+    )
+    # ── Per-model configs (legacy / backward compat) ────────────────────────
     parser.add_argument("--rssm_checkpoint", default=None)
     parser.add_argument("--rssm_config",
         default="configs/experiment/task_b_pure_aif.yaml")
     parser.add_argument("--tokenvit_checkpoint", default=None)
     parser.add_argument("--tokenvit_config",
         default="configs/experiment/token_vit.yaml")
+    # ── Preference from separate file ───────────────────────────────────────
+    parser.add_argument(
+        "--preference_checkpoint", default=None,
+        help="Separate preference checkpoint (e.g. pref_pooled.pt). "
+             "Merged into the world model checkpoint for scoring. "
+             "Use when the world model best.pt and preference were saved "
+             "separately (common for ViT+warp runs).",
+    )
     parser.add_argument("--horizons", default="1,3,5,7,10,12,15")
     parser.add_argument("--output_json",
         default="outputs/pp_gap_v5_results.json")
@@ -366,12 +399,16 @@ def main():
           f"obstacle_visible: {len(obs_images)} frames")
 
     results = {}
+    overrides = args.set or []
 
+    # --config overrides the per-model configs when explicitly provided.
     checkpoints = []
     if args.rssm_checkpoint:
-        checkpoints.append(("rssm", args.rssm_checkpoint, args.rssm_config))
+        cfg_path = args.config if args.config is not None else args.rssm_config
+        checkpoints.append(("rssm", args.rssm_checkpoint, cfg_path))
     if args.tokenvit_checkpoint:
-        checkpoints.append(("tokenvit", args.tokenvit_checkpoint, args.tokenvit_config))
+        cfg_path = args.config if args.config is not None else args.tokenvit_config
+        checkpoints.append(("tokenvit", args.tokenvit_checkpoint, cfg_path))
 
     if not checkpoints:
         print("ERROR: at least one of --rssm_checkpoint or --tokenvit_checkpoint required")
@@ -379,10 +416,27 @@ def main():
 
     for model_name, ckpt_path, cfg_path in checkpoints:
         print(f"\n[{model_name}] Loading from {ckpt_path} …")
-        wm, ckpt, cfg = build_world_model(cfg_path, ckpt_path, device)
+        print(f"  config: {cfg_path}"
+              + (f"  overrides: {overrides}" if overrides else ""))
+        wm, ckpt, cfg = build_world_model(
+            cfg_path, ckpt_path, device,
+            overrides=overrides or None,
+        )
+
+        # Optionally merge preference from a separate checkpoint file.
+        if args.preference_checkpoint:
+            print(f"  Loading preference from {args.preference_checkpoint} …")
+            pref_ckpt = torch.load(
+                args.preference_checkpoint, map_location=device, weights_only=False,
+            )
+            for pref_key in ("contrastive_preference", "token_contrastive_preference"):
+                if pref_key in pref_ckpt:
+                    ckpt[pref_key] = pref_ckpt[pref_key]
+                    print(f"  Loaded '{pref_key}' from separate preference checkpoint")
 
         if "contrastive_preference" not in ckpt:
             print(f"  WARNING: no contrastive_preference in checkpoint, skipping {model_name}")
+            print(f"  Hint: use --preference_checkpoint to supply a separately-fitted preference.")
             continue
 
         scorer = ContrastiveScorer(ckpt, device)

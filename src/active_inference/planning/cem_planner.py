@@ -167,6 +167,7 @@ class iCEMPlanner:
             scores = efe_scorer.score(
                 feats, means_list, stds_list,
                 pref_model, ensemble, state_decoder,
+                trajectory_states=trajectory,
             )
 
             elite_idxs = scores.argsort()[: self._n_elites]
@@ -193,6 +194,7 @@ class iCEMPlanner:
         efe_total = efe_scorer.score(
             feats_one, means_one, stds_one,
             pref_model, ensemble, state_decoder,
+            trajectory_states=traj_one,
         )
         epistemic_total = sum(
             ensemble.epistemic_uncertainty(f).item() for f in feats_one

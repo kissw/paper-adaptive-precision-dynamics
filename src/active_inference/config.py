@@ -39,6 +39,8 @@ class TrainingConfig:
     beta_obstacle_aux: float = 0.0  # auxiliary obstacle prediction loss weight
     overshoot_horizon: int = 0      # latent overshooting D; 0 = disabled
     overshoot_weight: float = 0.0   # loss weight for overshoot KL term
+    token_kl_weighting: str = "none"     # "none"|"error" — A3 token-weighted KL
+    warp_smoothness_weight: float = 0.0  # A1 flow TV regularization weight
 
 
 @dataclass
@@ -76,6 +78,8 @@ class PreferenceConfig:
     task_b_data: str | None = None
     max_samples: int = 3000
     balance_ratio: float = 0.5
+    token_wise: bool = False   # A2: use token-wise contrastive preference in EFE
+    topk: int = 8              # A2: top-k aggregation over N token scores
 
 
 @dataclass
@@ -136,6 +140,7 @@ class TokenViTConfig:
     dropout: float = 0.0
     min_std: float = 0.1
     action_dim: int = 2
+    use_action_warp: bool = False  # A1: warp token grid by action flow in prior
 
 
 @dataclass
@@ -156,8 +161,19 @@ class Config:
     token_vit: TokenViTConfig = field(default_factory=TokenViTConfig)
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> Config:
+    def from_yaml(
+        cls,
+        path: str | Path,
+        overrides: list[str] | None = None,
+    ) -> "Config":
+        """Load config from YAML, optionally applying OmegaConf dotlist overrides.
+
+        overrides: list of "key=value" strings, e.g.
+            ["training.overshoot_horizon=5", "training.overshoot_weight=0.5"]
+        """
         schema = OmegaConf.structured(cls)
         raw = OmegaConf.load(path)
         merged = OmegaConf.merge(schema, raw)
+        if overrides:
+            merged = OmegaConf.merge(merged, OmegaConf.from_dotlist(overrides))
         return OmegaConf.to_object(merged)

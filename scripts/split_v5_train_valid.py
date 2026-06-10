@@ -253,7 +253,12 @@ def main() -> None:
     )
     parser.add_argument("--input", required=True, help="Merged v5 HDF5 file, e.g. data/expert_data_v5.h5")
     parser.add_argument("--output_dir", required=True, help="Directory for split HDF5 files.")
-    parser.add_argument("--train_ratio", type=float, default=0.7)
+    parser.add_argument("--train_ratio", type=float, default=None,
+                        help="Fraction of episodes for training (0,1). Mutually exclusive with --valid_ratio.")
+    parser.add_argument("--valid_ratio", type=float, default=None,
+                        help="Fraction of episodes for validation (0,1). Converted to train_ratio=1-valid_ratio.")
+    parser.add_argument("--n_valid_episodes", type=int, default=None,
+                        help="Exact number of valid episodes. Overrides ratio-based selection.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--seq_len", type=int, default=50)
     parser.add_argument(
@@ -263,6 +268,19 @@ def main() -> None:
         help="Optional HDF5 compression. Default: no compression.",
     )
     args = parser.parse_args()
+
+    # Resolve train_ratio from valid_ratio / n_valid_episodes
+    if args.n_valid_episodes is not None:
+        # Will be applied after loading data; placeholder ratio set high
+        effective_train_ratio = None
+    elif args.valid_ratio is not None:
+        if not (0.0 < args.valid_ratio < 1.0):
+            raise ValueError("--valid_ratio must be in (0, 1)")
+        effective_train_ratio = 1.0 - args.valid_ratio
+    elif effective_train_ratio is not None:
+        effective_train_ratio = effective_train_ratio
+    else:
+        effective_train_ratio = 0.9  # default: 10% valid
 
     input_path = Path(args.input)
     output_dir = Path(args.output_dir)
@@ -278,11 +296,20 @@ def main() -> None:
     source_ids = data["source_ids"].astype(np.int32)
     obstacle_visible = data["obstacle_visible"].astype(bool)
 
+    # Override train_ratio with n_valid_episodes if provided
+    if args.n_valid_episodes is not None:
+        unique_eps = np.unique(episode_ids)
+        n_total = len(unique_eps)
+        n_valid = max(1, min(n_total - 1, args.n_valid_episodes))
+        effective_train_ratio = (n_total - n_valid) / n_total
+        print(f"n_valid_episodes={args.n_valid_episodes} → train_ratio={effective_train_ratio:.3f} "
+              f"(total {n_total} episodes, valid {n_valid})")
+
     train_eps, valid_eps = _stratified_episode_split(
         episode_ids=episode_ids,
         source_ids=source_ids,
         task_labels=task_labels,
-        train_ratio=args.train_ratio,
+        train_ratio=effective_train_ratio,
         seed=args.seed,
     )
 
@@ -295,7 +322,6 @@ def main() -> None:
         raise RuntimeError("Some frames were not assigned to train or valid split.")
 
     clean_mask = task_labels == 0
-    obstacle_scenario_mask = task_labels == 1
     visible_mask = obstacle_visible
 
     train_data = _select_by_mask(data, train_mask)
@@ -304,50 +330,53 @@ def main() -> None:
     clean_pref_train = _select_by_mask(data, train_mask & clean_mask)
     clean_pref_valid = _select_by_mask(data, valid_mask & clean_mask)
 
-    obs_vis_pref_train = _select_by_mask(
-        data,
-        train_mask & obstacle_scenario_mask & visible_mask,
-    )
-    obs_vis_pref_valid = _select_by_mask(
-        data,
-        valid_mask & obstacle_scenario_mask & visible_mask,
-    )
+    # task_labels 조건 제거: obstacle 파일은 이미 obstacle 시나리오만 담으므로
+    # visible_mask 만으로 충분. task_labels==1 AND를 추가하면 label이 0인
+    # obstacle 파일(task_labels 미설정)에서 0 frames가 된다.
+    obs_vis_pref_train = _select_by_mask(data, train_mask & visible_mask)
+    obs_vis_pref_valid = _select_by_mask(data, valid_mask & visible_mask)
+
+    if len(obs_vis_pref_train["images"]) == 0:
+        raise RuntimeError(
+            "obstacle visible train 0 frames. "
+            "task_labels/visibility mask 확인 필요."
+        )
 
     _write_h5(
         output_dir / "world_model_train_v5.h5",
         train_data,
-        _add_common_attrs(input_attrs, "world_model_train_v5", len(train_data["episode_ids"]), args.train_ratio, args.seed, args.seq_len),
+        _add_common_attrs(input_attrs, "world_model_train_v5", len(train_data["episode_ids"]), effective_train_ratio, args.seed, args.seq_len),
         compression=args.compression,
     )
     _write_h5(
         output_dir / "world_model_valid_v5.h5",
         valid_data,
-        _add_common_attrs(input_attrs, "world_model_valid_v5", len(valid_data["episode_ids"]), args.train_ratio, args.seed, args.seq_len),
+        _add_common_attrs(input_attrs, "world_model_valid_v5", len(valid_data["episode_ids"]), effective_train_ratio, args.seed, args.seq_len),
         compression=args.compression,
     )
 
     _write_h5(
         output_dir / "clean_preference_train_v5.h5",
         clean_pref_train,
-        _add_common_attrs(input_attrs, "clean_preference_train_v5", len(clean_pref_train["episode_ids"]), args.train_ratio, args.seed, args.seq_len),
+        _add_common_attrs(input_attrs, "clean_preference_train_v5", len(clean_pref_train["episode_ids"]), effective_train_ratio, args.seed, args.seq_len),
         compression=args.compression,
     )
     _write_h5(
         output_dir / "clean_preference_valid_v5.h5",
         clean_pref_valid,
-        _add_common_attrs(input_attrs, "clean_preference_valid_v5", len(clean_pref_valid["episode_ids"]), args.train_ratio, args.seed, args.seq_len),
+        _add_common_attrs(input_attrs, "clean_preference_valid_v5", len(clean_pref_valid["episode_ids"]), effective_train_ratio, args.seed, args.seq_len),
         compression=args.compression,
     )
     _write_h5(
         output_dir / "obstacle_visible_preference_train_v5.h5",
         obs_vis_pref_train,
-        _add_common_attrs(input_attrs, "obstacle_visible_preference_train_v5", len(obs_vis_pref_train["episode_ids"]), args.train_ratio, args.seed, args.seq_len),
+        _add_common_attrs(input_attrs, "obstacle_visible_preference_train_v5", len(obs_vis_pref_train["episode_ids"]), effective_train_ratio, args.seed, args.seq_len),
         compression=args.compression,
     )
     _write_h5(
         output_dir / "obstacle_visible_preference_valid_v5.h5",
         obs_vis_pref_valid,
-        _add_common_attrs(input_attrs, "obstacle_visible_preference_valid_v5", len(obs_vis_pref_valid["episode_ids"]), args.train_ratio, args.seed, args.seq_len),
+        _add_common_attrs(input_attrs, "obstacle_visible_preference_valid_v5", len(obs_vis_pref_valid["episode_ids"]), effective_train_ratio, args.seed, args.seq_len),
         compression=args.compression,
     )
 
@@ -361,7 +390,7 @@ def main() -> None:
             "collection_type": "pp_gap_eval_v5",
             "clean_frames": int(len(clean_pref_valid["episode_ids"])),
             "obstacle_visible_frames": int(len(obs_vis_pref_valid["episode_ids"])),
-            "train_ratio": float(args.train_ratio),
+            "train_ratio": float(effective_train_ratio),
             "split_seed": int(args.seed),
             "source_input": str(input_path),
         },
@@ -374,7 +403,7 @@ def main() -> None:
         f.create_dataset("train_frame_mask", data=train_mask.astype(bool))
         f.create_dataset("valid_frame_mask", data=valid_mask.astype(bool))
         f.attrs["source_input"] = str(input_path)
-        f.attrs["train_ratio"] = float(args.train_ratio)
+        f.attrs["train_ratio"] = float(effective_train_ratio)
         f.attrs["split_seed"] = int(args.seed)
         f.attrs["total_frames"] = int(n)
         f.attrs["train_frames"] = int(train_mask.sum())

@@ -26,8 +26,10 @@ training:
   kl_dyn_scale: 1.0
   kl_rep_scale: 0.5
   lr_warmup_steps: 1000
-  overshoot_horizon: 5
-  overshoot_weight: 0.5
+  overshoot_horizon: 0      # baseline: 1-step KL only; override with --set to enable
+  overshoot_weight: 0.0
+  token_kl_weighting: "none"    # A3: "none"|"error"
+  warp_smoothness_weight: 0.0   # A1: flow TV regularization
 
 ensemble:
   num_heads: 5

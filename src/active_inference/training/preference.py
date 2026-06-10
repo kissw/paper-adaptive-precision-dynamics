@@ -36,19 +36,37 @@ class PreferenceModel(nn.Module):
             indices.append(idx)
         self.means.data.copy_(data[indices])
 
-    def update_from_latents(self, latents: Tensor, n_iters: int = 200, lr: float = 0.01):
-        # latents: [N, latent_dim] — detached posterior means from expert data
+    def update_from_latents(
+        self,
+        latents: Tensor,
+        n_iters: int = 200,
+        lr: float = 0.01,
+        chunk_size: int = 50000,
+    ):
+        """Fit GMM via gradient descent with chunked mini-batch accumulation.
+
+        Processes latents in chunks of chunk_size so memory usage is bounded
+        regardless of the total number of tokens (e.g. 640K from TokenViT).
+        Each chunk contributes a weighted fraction of the total loss so the
+        gradient is equivalent to the full-batch gradient.
+        """
         self._kmeans_init(latents)
         optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        N = len(latents)
         prev_loss = float("inf")
         for i in range(n_iters):
             optimizer.zero_grad()
-            loss = -self.log_prob(latents).mean()
-            loss.backward()
+            total_loss = 0.0
+            for s in range(0, N, chunk_size):
+                batch = latents[s : s + chunk_size]
+                # Weight by chunk fraction so ∑ weighted_loss == full-batch loss
+                loss = -self.log_prob(batch).mean() * (len(batch) / N)
+                loss.backward()
+                total_loss += loss.item()
             optimizer.step()
-            if abs(prev_loss - loss.item()) < 1e-4:
+            if abs(prev_loss - total_loss) < 1e-4:
                 break
-            prev_loss = loss.item()
+            prev_loss = total_loss
 
     def save_state(self, path: str):
         torch.save(

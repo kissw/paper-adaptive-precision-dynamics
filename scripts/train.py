@@ -258,6 +258,16 @@ def main():
         default=0.0,
         help="Minimum loss decrease required to reset early-stop patience.",
     )
+    parser.add_argument(
+        "--set",
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help=(
+            "OmegaConf dotlist overrides applied after loading --config. "
+            "Example: --set training.overshoot_horizon=5 training.overshoot_weight=0.5"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -268,7 +278,7 @@ def main():
     if args.early_stop_min_delta < 0:
         raise ValueError("--early_stop_min_delta must be >= 0")
 
-    cfg = Config.from_yaml(args.config)
+    cfg = Config.from_yaml(args.config, overrides=args.set or None)
     if args.epochs:
         cfg.training.epochs = args.epochs
     if args.device:
