@@ -203,31 +203,45 @@ def reconstruct_gt_frames(
     wm,
     images: Tensor,
     states: Tensor,
+    actions: Tensor,
     start_idx: int,
     horizons: list[int],
     device: torch.device,
+    context_len: int = 5,
 ) -> dict[int, Tensor]:
-    """For each GT frame at start_idx+h, encode with fresh state then decode.
+    """For each target frame (start_idx+h), encode context_len frames ending
+    at that frame via sequential obs_step, then decode the final posterior.
 
-    Shows the decoder's reconstruction ceiling (posterior → decode)
-    as opposed to the prior rollout rows which never see the future frames.
+    This matches the training distribution (full temporal context) so the
+    decoder ceiling reflects in-distribution reconstruction quality.
     """
     result: dict[int, Tensor] = {}
     action_dim = wm._cfg.cem.action_dim
+    n = len(images)
+
     for h in horizons:
-        idx = start_idx + h
-        if idx >= len(images):
+        target = start_idx + h
+        if target >= n:
             break
-        img = images[idx:idx+1].to(device)
-        st  = states[idx:idx+1].to(device)
-        # Fresh initial state + zero prev_action: 1-step reconstruction
-        init_state = wm.rssm.initial(1, device)
-        prev_act   = torch.zeros(1, action_dim, device=device)
+
+        # Context window: up to context_len frames ending at target
+        ctx_start = max(0, target - context_len + 1)
+        state    = wm.rssm.initial(1, device)
+        prev_act = torch.zeros(1, action_dim, device=device)
+
         with deterministic_normal():
-            embed      = wm.encode_obs(img, st)
-            post, _    = wm.rssm.obs_step(init_state, prev_act, embed)
-            post       = make_deterministic(post)
-            dec        = wm.decode_obs(post)
+            for t in range(ctx_start, target + 1):
+                img   = images[t:t+1].to(device)
+                st    = states[t:t+1].to(device)
+                act   = actions[t:t+1].to(device)
+                embed = wm.encode_obs(img, st)
+                post, _ = wm.rssm.obs_step(state, prev_act, embed)
+                state   = type(post)(*[x.detach() for x in post])
+                prev_act = act
+
+            post = make_deterministic(state)
+            dec  = wm.decode_obs(post)
+
         result[h] = dec.squeeze(0).cpu()
     return result
 
@@ -253,7 +267,7 @@ def to_display(img: Tensor) -> np.ndarray:
 
 def build_grid(
     gt_row: dict[int, Tensor],
-    dec_row: dict[int, Tensor],
+    recon_rows: list[tuple[str, dict[int, Tensor]]],
     model_rows: list[tuple[str, dict[int, Tensor]]],
     horizons: list[int],
     start_label: str,
@@ -261,76 +275,95 @@ def build_grid(
 ):
     """Build comparison grid.
 
-    Row order: GT | Dec | model_0 | model_1 | ...
-    Col order: h=horizons[0] ... h=horizons[-1]
-    Row labels are drawn as text on the left edge of each row's first cell.
+    Row order:
+      [GT]                              — actual future frames
+      [<name>_recon  ×  n_models]       — encoder→decoder reconstruction ceiling
+      [<name>        ×  n_models]       — prior rollout decode
+    Col order: h = horizons[0] … horizons[-1]
+
+    Thin horizontal separator is drawn between GT/recon block and rollout block.
     """
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        import matplotlib.patches as mpatches
     except ImportError:
         print("matplotlib not available")
         return
 
-    all_rows = [("GT", gt_row), ("Dec", dec_row)] + list(model_rows)
-    n_rows = len(all_rows)
+    # Build flat row list with section tags: "gt" | "recon" | "rollout"
+    section_rows: list[tuple[str, str, dict[int, Tensor]]] = (
+        [("gt",      "GT",        gt_row)]
+        + [("recon",   label, data) for label, data in recon_rows]
+        + [("rollout", label, data) for label, data in model_rows]
+    )
+    n_rows = len(section_rows)
     n_cols = len(horizons)
 
-    # Extra left column for row labels
-    col_ratios = [0.55] + [1.0] * n_cols
+    # Separator after last recon row (before first rollout row)
+    sep_after = 1 + len(recon_rows) - 1   # index of last recon row
+
+    # Background colours per section
+    COLORS = {"gt": "#dff0df", "recon": "#ddeeff", "rollout": "#f5f5f5"}
+
+    col_ratios = [0.65] + [1.0] * n_cols
     fig, axes = plt.subplots(
         n_rows, n_cols + 1,
-        figsize=((n_cols + 0.55) * 1.3, n_rows * 1.45),
+        figsize=((n_cols + 0.65) * 1.3, n_rows * 1.45),
         gridspec_kw={"width_ratios": col_ratios},
         dpi=120,
     )
     if n_rows == 1:
         axes = axes[np.newaxis, :]
 
-    # Separator row index: between Dec and first model
-    SEPARATOR_AFTER = 1  # after "Dec"
+    for r, (section, label, row_data) in enumerate(section_rows):
+        bg = COLORS[section]
+        bold = section in ("gt",)
 
-    for r, (label, row_data) in enumerate(all_rows):
-        # Label cell (column 0)
+        # ── Label cell ────────────────────────────────────────────────
         lax = axes[r, 0]
         lax.axis("off")
-        color = "#e8f4e8" if label == "GT" else "#e8eef8" if label == "Dec" else "#ffffff"
-        lax.set_facecolor(color)
+        lax.set_facecolor(bg)
         lax.text(
-            0.92, 0.5, label,
+            0.94, 0.5, label,
             transform=lax.transAxes,
-            fontsize=8, fontweight="bold" if label in ("GT", "Dec") else "normal",
+            fontsize=7.5,
+            fontweight="bold" if bold else "normal",
             ha="right", va="center",
+            color="#111",
         )
 
-        # Draw a thin separator line below Dec row
-        if r == SEPARATOR_AFTER:
-            lax.axhline(y=0.02, color="#888", linewidth=1.0)
-
-        # Image cells (columns 1..n_cols)
+        # ── Image cells ───────────────────────────────────────────────
         for c, h in enumerate(horizons):
             ax = axes[r, c + 1]
             ax.axis("off")
-            if r == SEPARATOR_AFTER:
-                for spine in ax.spines.values():
-                    spine.set_visible(False)
             if h in row_data:
                 ax.imshow(to_display(row_data[h]), interpolation="nearest",
                           aspect="equal")
             else:
-                ax.set_facecolor("#222222")
+                ax.set_facecolor("#333333")
             if r == 0:
-                ax.set_title(f"h={h}", fontsize=7.5, pad=3,
-                             fontweight="bold")
+                ax.set_title(f"h={h}", fontsize=7.5, pad=3, fontweight="bold")
+
+        # ── Section separator: thick line below last-recon row ────────
+        if r == sep_after:
+            for c in range(n_cols + 1):
+                axes[r, c].spines["bottom"].set_visible(True)
+                axes[r, c].spines["bottom"].set_linewidth(1.5)
+                axes[r, c].spines["bottom"].set_color("#666")
+
+    # Section annotation on the left margin
+    if recon_rows:
+        fig.text(0.01, 0.98, "▶ Recon (encoder→decoder)",
+                 fontsize=6.5, color="#3366aa", va="top")
+    fig.text(0.01, 0.02, "▶ Prior rollout",
+             fontsize=6.5, color="#333", va="bottom")
 
     fig.suptitle(
-        f"Prior rollout  ·  start {start_label}  ·  "
-        "GT=actual | Dec=encoder→decoder | others=prior rollout",
-        fontsize=8, y=1.005,
+        f"Rollout decode comparison  ·  start: {start_label}",
+        fontsize=9, y=1.01,
     )
-    plt.tight_layout(pad=0.25, h_pad=0.15, w_pad=0.1)
+    plt.tight_layout(pad=0.3, h_pad=0.1, w_pad=0.08)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=120, bbox_inches="tight")
@@ -454,20 +487,24 @@ def main():
             gt_idx = start_idx + h
             gt_row[h] = images[gt_idx].cpu()
 
-        # Dec row: GT frames reconstructed through encoder → decoder (first model)
-        first_wm = models[0][1]
-        print(f"  [Dec] reconstructing GT via {models[0][0]} encoder …", end="", flush=True)
-        dec_row = reconstruct_gt_frames(
-            wm=first_wm,
-            images=images,
-            states=states,
-            start_idx=start_idx,
-            horizons=valid_horizons,
-            device=device,
-        )
-        print(f" done ({len(dec_row)} horizons)")
+        # Recon rows: each model encodes GT frames with context → decodes
+        recon_rows: list[tuple[str, dict[int, Tensor]]] = []
+        for name, wm in models:
+            print(f"  [{name}_recon] …", end="", flush=True)
+            rec = reconstruct_gt_frames(
+                wm=wm,
+                images=images,
+                states=states,
+                actions=actions,
+                start_idx=start_idx,
+                horizons=valid_horizons,
+                device=device,
+                context_len=args.context_len,
+            )
+            recon_rows.append((f"{name}_recon", rec))
+            print(f" done ({len(rec)} horizons)")
 
-        # Model rows: prior rollout decode
+        # Rollout rows: each model prior rollout from start_idx
         model_rows: list[tuple[str, dict[int, Tensor]]] = []
         for name, wm in models:
             print(f"  [{name}] rolling out …", end="", flush=True)
@@ -488,7 +525,7 @@ def main():
         out_path = str(output_dir / f"{output_stem}_idx{start_idx}{output_suffix}")
         build_grid(
             gt_row=gt_row,
-            dec_row=dec_row,
+            recon_rows=recon_rows,
             model_rows=model_rows,
             horizons=valid_horizons,
             start_label=f"frame {start_idx}  ep {ep}",
