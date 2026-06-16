@@ -1,0 +1,10 @@
+[
+  {"name": "rssm_rr_off",  "config": "configs/default.yaml",
+   "checkpoint": "outputs/v6_rssm_rr_off/checkpoints/best.pt", "overrides": []},
+  {"name": "rssm_rr_w2.0", "config": "configs/default.yaml",
+   "checkpoint": "outputs/v6_rssm_rr_w2.0/checkpoints/best.pt", "overrides": []},
+  {"name": "vit_rr_off",   "config": "configs/experiment/token_vit.yaml",
+   "checkpoint": "outputs/v6_vit_rr_off/checkpoints/best.pt", "overrides": []},
+  {"name": "vit_rr_w2.0",  "config": "configs/experiment/token_vit.yaml",
+   "checkpoint": "outputs/v6_vit_rr_w2.0/checkpoints/best.pt", "overrides": []}
+]

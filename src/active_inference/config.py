@@ -39,8 +39,12 @@ class TrainingConfig:
     beta_obstacle_aux: float = 0.0  # auxiliary obstacle prediction loss weight
     overshoot_horizon: int = 0      # latent overshooting D; 0 = disabled
     overshoot_weight: float = 0.0   # loss weight for overshoot KL term
-    token_kl_weighting: str = "none"     # "none"|"error" — A3 token-weighted KL
-    warp_smoothness_weight: float = 0.0  # A1 flow TV regularization weight
+    token_kl_weighting: str = "none"          # "none"|"error" — A3 token-weighted KL
+    warp_smoothness_weight: float = 0.0       # A1 flow TV regularization weight
+    rollout_recon_horizon: int = 0            # multi-step pixel rollout recon; 0=off
+    rollout_recon_weight: float = 0.0         # weight for rollout recon loss
+    rollout_recon_obstacle_weight: float = 1.0  # obstacle bbox pixel upweight (1=uniform)
+    rollout_recon_step_decay: float = 0.0     # per-step weight decay; 0=uniform
 
 
 @dataclass

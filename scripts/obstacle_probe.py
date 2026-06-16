@@ -28,15 +28,40 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+
+
+def _early_worker_limit(default: int = 10) -> int:
+    """Parse --worker from argv and cap BLAS/OpenMP threads BEFORE importing
+    numpy/torch.  BLAS thread pools read these env vars at import time, so the
+    cap must be applied here — setting them later has no effect.
+    """
+    w = default
+    if "--worker" in sys.argv:
+        try:
+            w = int(sys.argv[sys.argv.index("--worker") + 1])
+        except (ValueError, IndexError):
+            pass
+    w = max(1, w)
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[var] = str(w)
+    return w
+
+
+_N_WORKERS = _early_worker_limit()
 
 import h5py
 import numpy as np
 import torch
 from torch import Tensor
 from torch.distributions import Normal
+
+# Cap torch intra-op threads to match the requested worker count.
+torch.set_num_threads(_N_WORKERS)
 
 sys.path.insert(0, str(Path(__file__).parent))
 from pp_gap_v5 import build_world_model
@@ -455,7 +480,19 @@ def main():
     parser.add_argument("--runs_json", default=None)
     parser.add_argument("--output_dir", default="outputs")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--worker", type=int, default=10,
+        help="Max CPU threads for BLAS/torch/sklearn (default 10). "
+             "Caps OMP/MKL/OpenBLAS thread pools to limit CPU usage.",
+    )
     args = parser.parse_args()
+
+    # Worker count was already applied to BLAS env vars at import time via
+    # _early_worker_limit().  Re-assert here for torch + sklearn n_jobs.
+    n_workers = max(1, args.worker)
+    torch.set_num_threads(n_workers)
+    print(f"CPU thread cap: {n_workers} workers "
+          f"(OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS')})")
 
     horizons = [int(h) for h in args.horizons.split(",")]
     device   = torch.device(args.device if torch.cuda.is_available() else "cpu")

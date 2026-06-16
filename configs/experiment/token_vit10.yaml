@@ -89,8 +89,8 @@ training:
   seq_len: 50
   lr: 1.0e-4
   grad_clip: 100.0
-  kl_dyn_scale: 1.0
-  kl_rep_scale: 0.5
+  kl_dyn_scale: 0.1
+  kl_rep_scale: 0.05
   free_nats: 1.0
   overshoot_horizon: 0      # baseline: 1-step KL only; override with --set to enable
   overshoot_weight: 0.0

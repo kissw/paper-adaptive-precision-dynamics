@@ -29,6 +29,10 @@ training:
   overshoot_weight: 0.0
   token_kl_weighting: "none"
   warp_smoothness_weight: 0.0
+  rollout_recon_horizon: 0
+  rollout_recon_weight: 0.0
+  rollout_recon_obstacle_weight: 1.0
+  rollout_recon_step_decay: 0.0
 
 ensemble:
   num_heads: 2

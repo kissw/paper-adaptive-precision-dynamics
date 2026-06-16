@@ -272,15 +272,41 @@ class DeepAIFAgent:
     ) -> Tensor:
         return self.step_with_info(obs_img, obs_state).action
 
+    @staticmethod
+    def _bbox_weight_map(
+        bbox: Tensor, img_shape, obstacle_weight: float, device,
+    ) -> Tensor:
+        """Build a (B,1,H,W) weight map: 1 outside bbox, obstacle_weight inside.
+
+        bbox: (B, 4) pixel xyxy. NaN/invalid rows produce all-ones (uniform).
+        img_shape: (B, C, H, W) of the reconstruction.
+        """
+        B, _, H, W = img_shape
+        w_map = torch.ones(B, 1, H, W, device=device)
+        bbox = bbox.to(device).float()
+        ys = torch.arange(H, device=device).view(1, H, 1)
+        xs = torch.arange(W, device=device).view(1, 1, W)
+        for b in range(B):
+            x1, y1, x2, y2 = bbox[b]
+            if torch.isnan(bbox[b]).any() or x2 <= x1 or y2 <= y1:
+                continue
+            inside_y = (ys[0] >= y1) & (ys[0] <= y2)   # (H,1)
+            inside_x = (xs[0] >= x1) & (xs[0] <= x2)   # (1,W)
+            mask = inside_y & inside_x                  # (H,W)
+            w_map[b, 0] = 1.0 + (obstacle_weight - 1.0) * mask.float()
+        return w_map
+
     def update(
         self,
         images: Tensor,
         states: Tensor,
         actions: Tensor,
         obstacle_labels: Tensor | None = None,
+        obstacle_bbox: Tensor | None = None,
     ) -> dict[str, float]:
         # Per-timestep backward with NaN guard, AMP, and CUDA error recovery
         # obstacle_labels: [B, T] binary (1=obstacle visible, 0=clear)
+        # obstacle_bbox:   [B, T, 4] pixel xyxy bbox; None = no bbox weighting
         B, T = images.shape[0], images.shape[1]
         wm = self.world_model
         cfg = self._cfg.training
@@ -290,13 +316,17 @@ class DeepAIFAgent:
         overshoot_weight = getattr(cfg, "overshoot_weight", 0.0)
         token_kl_weighting = getattr(cfg, "token_kl_weighting", "none")
         warp_smoothness_weight = getattr(cfg, "warp_smoothness_weight", 0.0)
+        rollout_recon_horizon = getattr(cfg, "rollout_recon_horizon", 0)
+        rollout_recon_weight = getattr(cfg, "rollout_recon_weight", 0.0)
+        rollout_recon_obs_w = getattr(cfg, "rollout_recon_obstacle_weight", 1.0)
+        rollout_recon_decay = getattr(cfg, "rollout_recon_step_decay", 0.0)
 
         self._optimizer.zero_grad()
         total_loss_value = 0.0
         accum = {
             "img_loss": 0.0, "state_loss": 0.0,
             "kl_dyn": 0.0, "kl_rep": 0.0, "obs_aux_loss": 0.0,
-            "overshoot_kl": 0.0,
+            "overshoot_kl": 0.0, "rollout_recon": 0.0,
         }
 
         # ── 1st pass: collect stop-grad posterior references for overshooting ──
@@ -361,6 +391,40 @@ class DeepAIFAgent:
                     smooth = wm.rssm.warp_smoothness_loss()
                     loss = loss + warp_smoothness_weight * smooth
 
+                # Multi-step pixel rollout reconstruction loss.
+                # From the current posterior, roll out H prior steps using GT actions
+                # and compare decoded images to GT future frames.  Trains the prior
+                # decoder to produce visually coherent futures.
+                rr_val = 0.0
+                if rollout_recon_horizon > 0 and rollout_recon_weight > 0.0:
+                    n_rr = min(rollout_recon_horizon, T - 1 - t)
+                    if n_rr > 0:
+                        state_rr = post
+                        rr_loss  = torch.zeros((), device=self._device)
+                        for h in range(1, n_rr + 1):
+                            act_rr    = actions[:, t + h].to(self._device)
+                            state_rr  = wm.rssm.img_step(state_rr, act_rr)
+                            recon_rr  = wm.decode_obs(state_rr)
+                            target_rr = wm.preprocess_image(
+                                images[:, t + h].to(self._device)
+                            )
+                            mse_rr = (recon_rr - target_rr).pow(2)  # (B,C,H,W)
+                            # Obstacle bbox pixel upweighting (if bbox provided)
+                            if rollout_recon_obs_w > 1.0 and obstacle_bbox is not None:
+                                w_map = self._bbox_weight_map(
+                                    obstacle_bbox[:, t + h],
+                                    recon_rr.shape,
+                                    rollout_recon_obs_w,
+                                    self._device,
+                                )  # (B,1,H,W)
+                                mse_rr = mse_rr * w_map
+                            # Optional per-step decay (0=uniform weight)
+                            step_w = (1.0 - rollout_recon_decay) ** (h - 1)
+                            rr_loss = rr_loss + step_w * mse_rr.mean()
+                        rr_loss = rr_loss / n_rr
+                        loss    = loss + rollout_recon_weight * rr_loss
+                        rr_val  = rr_loss.item()
+
                 # Auxiliary obstacle prediction loss
                 obs_aux_loss_val = 0.0
                 if (obstacle_labels is not None
@@ -414,6 +478,7 @@ class DeepAIFAgent:
                 accum[k] += info[k].item()
             accum["obs_aux_loss"] += obs_aux_loss_val
             accum["overshoot_kl"] += osh_kl_val
+            accum["rollout_recon"] += rr_val
 
             prev_state = type(post)(
                 *[x.detach() for x in post],

@@ -13,7 +13,54 @@ from active_inference.agent import DeepAIFAgent
 from active_inference.data.dataset import get_dataloader, get_preference_dataloader
 from active_inference.data.synthetic import SyntheticDrivingData
 from active_inference.training.losses import compute_vfe
+from active_inference.training.diag_grid import make_diag_grid
 from active_inference.utils.seed import set_seed
+
+
+def _select_diag_window(h5_path: str, seq_len: int, start_idx: int | None):
+    """Pick a fixed (images, states, actions, window_start_idx) for diagnostics.
+
+    Chooses a contiguous same-episode window of length seq_len.  When start_idx
+    is None, anchors on the first frame whose obstacle_visible flag is True so
+    the obstacle is in view; the rollout begins partway into the window.
+    """
+    import h5py
+    import numpy as np
+
+    with h5py.File(h5_path, "r") as f:
+        episode_ids = f["episode_ids"][:]
+        obs_vis = (
+            f["obstacle_visible"][:].astype(bool)
+            if "obstacle_visible" in f else None
+        )
+        n = len(episode_ids)
+
+        # Determine the anchor frame
+        if start_idx is None and obs_vis is not None and obs_vis.any():
+            anchor = int(np.where(obs_vis)[0][len(np.where(obs_vis)[0]) // 2])
+        elif start_idx is not None:
+            anchor = int(start_idx)
+        else:
+            anchor = n // 2
+
+        # Build a same-episode window of length seq_len ending well past anchor
+        ep = episode_ids[anchor]
+        ep_idxs = np.where(episode_ids == ep)[0]
+        ep_start, ep_end = int(ep_idxs[0]), int(ep_idxs[-1])
+        win_start = max(ep_start, min(anchor - seq_len // 3, ep_end - seq_len + 1))
+        win_start = max(ep_start, win_start)
+        win_end = min(win_start + seq_len, ep_end + 1)
+        if win_end - win_start < 2:
+            return None
+
+        images  = torch.from_numpy(f["images"][win_start:win_end]).float()
+        states  = torch.from_numpy(f["states"][win_start:win_end]).float()
+        actions = torch.from_numpy(f["actions"][win_start:win_end]).float()
+
+    # Rollout start position within the window
+    local_start = max(0, anchor - win_start)
+    local_start = min(local_start, (win_end - win_start) - 2)
+    return images, states, actions, local_start
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +315,19 @@ def main():
             "Example: --set training.overshoot_horizon=5 training.overshoot_weight=0.5"
         ),
     )
+    parser.add_argument(
+        "--diag_grid", action="store_true", default=False,
+        help="Save a 5-row rollout diagnostic grid each time best.pt improves.",
+    )
+    parser.add_argument(
+        "--diag_start_idx", type=int, default=None,
+        help="Frame index (within validation data) to anchor the diagnostic grid. "
+             "Default: auto-pick a frame with a visible obstacle.",
+    )
+    parser.add_argument(
+        "--diag_horizons", default="1,5,10,15",
+        help="Comma-separated horizons for the diagnostic grid columns.",
+    )
 
     args = parser.parse_args()
 
@@ -334,6 +394,24 @@ def main():
                 print(f"Auto-detected start epoch: {start_epoch}")
 
     writer = SummaryWriter(str(output_dir / "tb_logs"))
+
+    # Fixed diagnostic window (selected once so successive grids are comparable)
+    diag_window = None
+    diag_dir = output_dir / "diag"
+    diag_horizons = [int(h) for h in args.diag_horizons.split(",")]
+    if args.diag_grid:
+        diag_source = args.valid_data if args.valid_data is not None else data_path
+        try:
+            diag_window = _select_diag_window(
+                diag_source, cfg.training.seq_len, args.diag_start_idx,
+            )
+            if diag_window is not None:
+                print(f"Diagnostic grid enabled: source={diag_source} "
+                      f"window_len={diag_window[0].shape[0]} "
+                      f"local_start={diag_window[3]}")
+        except Exception as e:
+            print(f"WARNING: diag window selection failed ({e}); disabling diag grid")
+            diag_window = None
 
     global_step = start_epoch * len(dataloader)
     best_loss = float("inf")
@@ -438,6 +516,27 @@ def main():
                 str(ckpt_dir / "best.pt"),
             )
             print(f"  New best checkpoint saved: epoch={best_epoch}, loss={best_loss:.6f}")
+
+            # Diagnostic rollout grid (best.pt improved this epoch)
+            if diag_window is not None:
+                d_imgs, d_states, d_actions, d_start = diag_window
+                try:
+                    ok = make_diag_grid(
+                        agent.world_model,
+                        d_imgs, d_states, d_actions,
+                        start_idx=d_start,
+                        output_path=str(diag_dir / f"diag_epoch{best_epoch}_best.png"),
+                        horizons=diag_horizons,
+                        context_len=min(5, cfg.training.seq_len),
+                        device=agent._device,
+                        title=f"epoch {best_epoch}  val={last_val_loss}"
+                              if last_val_loss is not None else f"epoch {best_epoch}",
+                    )
+                    if ok:
+                        print(f"  Diagnostic grid → "
+                              f"{diag_dir / f'diag_epoch{best_epoch}_best.png'}")
+                except Exception as e:
+                    print(f"  WARNING: diag grid failed: {e}")
         else:
             epochs_without_improvement += 1
             if best_loss < float("inf"):
