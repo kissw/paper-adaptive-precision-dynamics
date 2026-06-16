@@ -85,6 +85,28 @@ def _mean_feat(state) -> np.ndarray:
     return state.mean.squeeze(0).cpu().numpy()
 
 
+def _obstacle_mask(wm, bbox_xyxy, H: int, W: int, device) -> torch.Tensor | None:
+    """Build a (1,1,H,W) obstacle mask in MODEL space, aligned with decode output.
+
+    The bbox is in the original image's pixel coords.  Because the decoder output
+    lives in preprocess_image (crop_road) space, we rasterize the mask in original
+    space then push it through the SAME wm.preprocess_image so geometry matches
+    regardless of crop settings.  Returns None for degenerate / NaN bboxes.
+    """
+    x1, y1, x2, y2 = [float(v) for v in bbox_xyxy]
+    if any(np.isnan([x1, y1, x2, y2])) or x2 <= x1 or y2 <= y1:
+        return None
+    mask = torch.zeros(1, 1, H, W, device=device)
+    xi1, yi1 = max(0, int(np.floor(x1))), max(0, int(np.floor(y1)))
+    xi2, yi2 = min(W, int(np.ceil(x2))),  min(H, int(np.ceil(y2)))
+    if xi2 <= xi1 or yi2 <= yi1:
+        return None
+    mask[:, :, yi1:yi2, xi1:xi2] = 1.0
+    # Map into model space via the same crop/resize as the decoder target.
+    mask = wm.preprocess_image(mask)
+    return (mask > 0.5).float()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Per-frame rollout with GT actions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,6 +153,10 @@ def rollout_one(
     fs = slice(idx + 1, idx + max_h + 1)
     fut_act = torch.tensor(f["actions"][fs], dtype=torch.float32)
     fut_img = torch.tensor(f["images"][fs],  dtype=torch.float32)
+    # Future obstacle bbox + visibility (for region-specific MSE)
+    fut_bbox = f["obstacle_bbox"][fs] if "obstacle_bbox" in f else None
+    fut_vis  = (f["obstacle_visible"][fs].astype(bool)
+                if "obstacle_visible" in f else None)
 
     feat0      = _feat(wm, start_state)
     mean0      = _mean_feat(start_state)
@@ -141,8 +167,11 @@ def rollout_one(
         "drift_from_start": {},
         "drift_step":       {},
         "mean_drift_start": {},
-        "recon_mse":        {},
+        "recon_mse":        {},      # full-frame MSE
+        "recon_mse_obs":    {},      # obstacle-region MSE (only where obstacle visible)
     }
+
+    H, W = fut_img.shape[-2], fut_img.shape[-1]
 
     with _det_normal():
         s = start_state
@@ -161,7 +190,17 @@ def rollout_one(
             # Rollout reconstruction MSE vs GT future frame
             recon  = wm.decode_obs(s)
             target = wm.preprocess_image(fut_img[h - 1:h].to(device))
-            out["recon_mse"][h] = float((recon - target).pow(2).mean().item())
+            sq     = (recon - target).pow(2)              # (1,C,H,W)
+            out["recon_mse"][h] = float(sq.mean().item())
+
+            # Obstacle-region MSE: only when the future frame shows the obstacle
+            if (fut_bbox is not None and fut_vis is not None
+                    and bool(fut_vis[h - 1])):
+                mask = _obstacle_mask(wm, fut_bbox[h - 1], H, W, device)
+                if mask is not None and float(mask.sum()) > 0:
+                    # mask: (1,1,H,W) → broadcast over channels
+                    masked = (sq * mask).sum() / (mask.sum() * sq.shape[1])
+                    out["recon_mse_obs"][h] = float(masked.item())
 
     return out
 
@@ -172,7 +211,8 @@ def rollout_one(
 
 @torch.no_grad()
 def run_model(wm, path, sel_idx, episode_ids_all, context_len, max_h, device):
-    keys = ["drift_from_start", "drift_step", "mean_drift_start", "recon_mse"]
+    keys = ["drift_from_start", "drift_step", "mean_drift_start",
+            "recon_mse", "recon_mse_obs"]
     acc = {k: {h: [] for h in range(1, max_h + 1)} for k in keys}
     n_used = 0
     with h5py.File(path, "r") as f:
@@ -214,9 +254,10 @@ def plot_drift(results: dict, max_h: int, output_png: str):
     panels = [
         ("drift_from_start", "‖feat_h − feat_0‖  (drift from start)"),
         ("drift_step",       "‖feat_h − feat_{h-1}‖  (per-step change)"),
-        ("recon_mse",        "rollout decode MSE vs GT future"),
+        ("recon_mse",        "rollout decode MSE — full frame"),
+        ("recon_mse_obs",    "rollout decode MSE — obstacle region"),
     ]
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.6), dpi=120)
+    fig, axes = plt.subplots(1, 4, figsize=(21, 4.6), dpi=120)
 
     for (key, ylabel), ax in zip(panels, axes):
         for name, summ in results.items():
@@ -317,8 +358,10 @@ def main():
                 ds = summ["drift_from_start"][h]["mean"]
                 st = summ["drift_step"][h]["mean"]
                 mse = summ["recon_mse"][h]["mean"]
+                obs = summ["recon_mse_obs"].get(h, {}).get("mean", float("nan"))
                 print(f"    h={h:2d}  drift_from_start={ds:.4f}  "
-                      f"drift_step={st:.4f}  recon_mse={mse:.5f}")
+                      f"drift_step={st:.4f}  recon_mse={mse:.5f}  "
+                      f"recon_mse_obs={obs:.5f}")
 
     # Save JSON
     json_path = out_dir / "rollout_drift_results.json"
@@ -339,10 +382,14 @@ def main():
             d20 = summ["drift_from_start"][args.max_h]["mean"]
             d1  = summ["drift_from_start"].get(1, {}).get("mean", float("nan"))
             mse20 = summ["recon_mse"][args.max_h]["mean"]
+            obs20 = summ["recon_mse_obs"].get(args.max_h, {}).get("mean", float("nan"))
             print(f"  {name:14s}  drift@h{args.max_h}={d20:.4f}  "
-                  f"(h1={d1:.4f})  recon_mse@h{args.max_h}={mse20:.5f}")
+                  f"(h1={d1:.4f})  full_mse@h{args.max_h}={mse20:.5f}  "
+                  f"obs_mse@h{args.max_h}={obs20:.5f}")
     print("  → near-zero drift = rollout frozen (probe = artifact).")
     print("  → higher recon_mse with higher probe = probe unsuitable.")
+    print("  → obstacle-region MSE: ViT < RSSM = direct evidence ViT predicts")
+    print("    the obstacle better even if full-frame MSE is similar.")
     print("\nDone.")
 
 
