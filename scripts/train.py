@@ -328,6 +328,24 @@ def main():
         "--diag_horizons", default="1,5,10,15",
         help="Comma-separated horizons for the diagnostic grid columns.",
     )
+    parser.add_argument(
+        "--num_workers", type=int, default=10,
+        help="DataLoader CPU worker 개수 (also caps torch intra-op threads)",
+    )
+    parser.add_argument(
+        "--stage", choices=["joint", "ae", "transition"], default="joint",
+        help="Two-stage training: joint (default, original) | "
+             "ae (encoder-decoder only) | transition (rssm only, enc-dec frozen)",
+    )
+    parser.add_argument(
+        "--init_from", default=None,
+        help="Stage-1 (ae) checkpoint to initialise encoder-decoder weights "
+             "from, used in --stage transition.",
+    )
+    parser.add_argument(
+        "--ae_kl_rep", type=float, default=0.01,
+        help="Stage-ae weak posterior KL toward N(0,1); 0 = pure AE.",
+    )
 
     args = parser.parse_args()
 
@@ -343,6 +361,14 @@ def main():
         cfg.training.epochs = args.epochs
     if args.device:
         cfg.device = args.device
+    # Two-stage training settings (must be set before agent construction so the
+    # stage-aware optimizer / freeze logic in DeepAIFAgent.__init__ applies).
+    cfg.training.stage = args.stage
+    cfg.training.ae_kl_rep = args.ae_kl_rep
+
+    # Cap CPU thread usage to avoid over-subscription on shared machines.
+    if args.num_workers > 0:
+        torch.set_num_threads(args.num_workers)
 
     set_seed(cfg.seed)
     output_dir = Path(args.output_dir)
@@ -363,7 +389,7 @@ def main():
         data_path,
         batch_size=cfg.training.batch_size,
         seq_len=cfg.training.seq_len,
-        num_workers=0,
+        num_workers=args.num_workers,
         shuffle=True,
     )
 
@@ -373,13 +399,23 @@ def main():
             args.valid_data,
             batch_size=cfg.training.batch_size,
             seq_len=cfg.training.seq_len,
-            num_workers=0,
+            num_workers=args.num_workers,
             shuffle=False,
         )
         print(f"Using validation data: {args.valid_data}")
         print(f"Validation sequences: {len(valid_loader.dataset)}")
 
     agent = DeepAIFAgent(cfg)
+    print(f"Training stage: {args.stage}")
+
+    # Stage-2 (transition): initialise encoder-decoder from a stage-1 ckpt.
+    if args.stage == "transition":
+        if args.init_from is None:
+            print("WARNING: --stage transition without --init_from; "
+                  "encoder-decoder will use random init (not recommended).")
+        else:
+            agent.load_encoder_decoder(args.init_from)
+            agent.freeze_encoder_decoder()  # re-assert eval()/requires_grad after load
 
     start_epoch = args.start_epoch
     if args.resume:
@@ -451,7 +487,10 @@ def main():
                 images, states, actions = batch
                 obs_labels = None
             try:
-                info = agent.update(images, states, actions, obs_labels)
+                if args.stage == "ae":
+                    info = agent.update_ae(images, states, actions, obs_labels)
+                else:
+                    info = agent.update(images, states, actions, obs_labels)
             except RuntimeError as e:
                 if "CUDA" in str(e):
                     print(f"\nCUDA error at epoch {epoch + 1}, batch {batch_idx}: {e}")

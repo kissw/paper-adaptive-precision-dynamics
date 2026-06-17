@@ -19,6 +19,8 @@ def compute_vfe(
     kl_dyn_scale: float = 1.0,
     kl_rep_scale: float = 0.1,
     token_kl_weighting: str = "none",
+    obstacle_bbox: Tensor | None = None,
+    img_recon_obstacle_weight: float = 1.0,
 ) -> tuple[Tensor, dict[str, Tensor]]:
     """Compute Variational Free Energy.
 
@@ -27,6 +29,11 @@ def compute_vfe(
       "error" : weight token KL by its own magnitude (error-feedback weighting).
                 Only active when post_mean is 3D (B, N, Z); falls back to "none"
                 for 2D RSSM states.
+
+    obstacle_bbox / img_recon_obstacle_weight — obstacle-region image upweighting:
+      When img_recon_obstacle_weight > 1 and obstacle_bbox is given (B,4 pixel xyxy
+      in model space), pixels inside each bbox contribute proportionally more to
+      img_loss.  weight=1.0 or bbox=None → standard uniform MSE (regression-safe).
     """
     post = Normal(post_mean, post_std)
     prior = Normal(prior_mean, prior_std)
@@ -54,9 +61,17 @@ def compute_vfe(
 
     # Image reconstruction: per-dimension MSE
     c, h, w = obs_img.shape[1], obs_img.shape[2], obs_img.shape[3]
-    img_loss = F.mse_loss(recon_img, obs_img, reduction="none").sum(dim=(1, 2, 3)).mean() / (
-        c * h * w
-    )
+    err = F.mse_loss(recon_img, obs_img, reduction="none")  # (B,C,H,W)
+    if img_recon_obstacle_weight > 1.0 and obstacle_bbox is not None:
+        # Reuse the same bbox→weight-map helper as the rollout recon path.
+        # Lazy import avoids a circular import (agent imports this module).
+        from active_inference.agent import DeepAIFAgent
+        w_map = DeepAIFAgent._bbox_weight_map(
+            obstacle_bbox, recon_img.shape,
+            img_recon_obstacle_weight, recon_img.device,
+        )  # (B,1,H,W)
+        err = err * w_map
+    img_loss = err.sum(dim=(1, 2, 3)).mean() / (c * h * w)
 
     # State reconstruction with symlog
     state_loss = F.mse_loss(symlog(recon_state), symlog(obs_state))

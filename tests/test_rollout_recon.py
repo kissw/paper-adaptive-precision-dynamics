@@ -88,6 +88,54 @@ class TestRolloutReconLoss:
         assert abs(i1["rollout_recon"] - i2["rollout_recon"]) > 1e-6
 
 
+class TestImgReconObstacleWeight:
+    def _bbox(self, cfg, B=2):
+        T = cfg.training.seq_len
+        return torch.tensor([[[10., 10., 40., 40.]] * T] * B)
+
+    def test_weight_one_ignores_bbox(self):
+        """img_recon_obstacle_weight=1.0 → bbox has no effect (regression)."""
+        agent, cfg = _agent()
+        agent2, cfg2 = _agent()
+        # Sync weights BEFORE any update (update mutates weights via optimizer).
+        agent2.world_model.load_state_dict(agent.world_model.state_dict())
+        batch = _batch(cfg)
+
+        torch.manual_seed(123)
+        i_nobbox = agent.update(*[b.clone() for b in batch])
+        torch.manual_seed(123)
+        i_bbox = agent2.update(*[b.clone() for b in batch],
+                               obstacle_bbox=self._bbox(cfg2))
+        assert abs(i_nobbox["img_loss"] - i_bbox["img_loss"]) < 1e-9
+
+    def test_weight_high_with_bbox_changes_img_loss(self):
+        a_base, cfg = _agent()
+        a_w, cfg_w = _agent(["training.img_recon_obstacle_weight=5.0"])
+        a_w.world_model.load_state_dict(a_base.world_model.state_dict())
+        batch = _batch(cfg)
+
+        torch.manual_seed(123)
+        i_base = a_base.update(*[b.clone() for b in batch],
+                               obstacle_bbox=self._bbox(cfg))
+        torch.manual_seed(123)
+        i_w = a_w.update(*[b.clone() for b in batch],
+                         obstacle_bbox=self._bbox(cfg_w))
+        assert i_w["img_loss"] > i_base["img_loss"]
+
+    def test_weight_high_without_bbox_is_regression(self):
+        """weight>1 but bbox=None → identical to baseline."""
+        a_base, cfg = _agent()
+        a_w, cfg_w = _agent(["training.img_recon_obstacle_weight=5.0"])
+        a_w.world_model.load_state_dict(a_base.world_model.state_dict())
+        batch = _batch(cfg)
+
+        torch.manual_seed(123)
+        i_base = a_base.update(*[b.clone() for b in batch])
+        torch.manual_seed(123)
+        i_w = a_w.update(*[b.clone() for b in batch])  # no bbox
+        assert abs(i_base["img_loss"] - i_w["img_loss"]) < 1e-9
+
+
 class TestBboxWeightMap:
     def test_uniform_outside_bbox(self):
         bbox = torch.tensor([[10., 10., 30., 30.]])

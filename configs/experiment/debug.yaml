@@ -33,6 +33,9 @@ training:
   rollout_recon_weight: 0.0
   rollout_recon_obstacle_weight: 1.0
   rollout_recon_step_decay: 0.0
+  img_recon_obstacle_weight: 1.0
+  stage: "joint"             # joint | ae | transition (two-stage training)
+  ae_kl_rep: 0.01            # stage-ae weak posterior KL; 0=pure AE
 
 ensemble:
   num_heads: 2

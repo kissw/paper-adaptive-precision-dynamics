@@ -169,11 +169,43 @@ class DeepAIFAgent:
             heading_only_state=getattr(cfg.efe, "heading_only_state", False),
         )
 
-        self._optimizer = torch.optim.Adam(self.world_model.parameters(), lr=cfg.training.lr)
+        # Two-stage training: "joint" (default), "ae" (encoder-decoder only),
+        # or "transition" (rssm only, encoder-decoder frozen).
+        self._stage = getattr(cfg.training, "stage", "joint")
+        if self._stage == "transition":
+            self.freeze_encoder_decoder()
+            self._optimizer = torch.optim.Adam(
+                self.world_model.rssm.parameters(), lr=cfg.training.lr,
+            )
+        elif self._stage == "ae":
+            wm = self.world_model
+            ae_params = (
+                list(wm.encoder.parameters())
+                + list(wm.obs_decoder.parameters())
+                + list(wm.state_decoder.parameters())
+            )
+            self._optimizer = torch.optim.Adam(ae_params, lr=cfg.training.lr)
+        else:  # joint — original behaviour
+            self._optimizer = torch.optim.Adam(
+                self.world_model.parameters(), lr=cfg.training.lr,
+            )
+
         self._use_amp = "cuda" in str(self._device)
         self._scaler = torch.amp.GradScaler("cuda") if self._use_amp else None
         self._prev_state: RSSMState | None = None
         self._prev_action: Tensor | None = None
+
+    def freeze_encoder_decoder(self):
+        """Freeze encoder + obs_decoder + state_decoder (stage-2 transition).
+
+        Sets requires_grad=False and puts the modules in eval() so dropout/BN
+        (if any) behave deterministically.  The RSSM transition stays trainable.
+        """
+        wm = self.world_model
+        for mod in (wm.encoder, wm.obs_decoder, wm.state_decoder):
+            for p in mod.parameters():
+                p.requires_grad = False
+            mod.eval()
 
     def reset(self):
         self._prev_state = self.world_model.rssm.initial(1, self._device)
@@ -320,6 +352,7 @@ class DeepAIFAgent:
         rollout_recon_weight = getattr(cfg, "rollout_recon_weight", 0.0)
         rollout_recon_obs_w = getattr(cfg, "rollout_recon_obstacle_weight", 1.0)
         rollout_recon_decay = getattr(cfg, "rollout_recon_step_decay", 0.0)
+        img_recon_obs_w = getattr(cfg, "img_recon_obstacle_weight", 1.0)
 
         self._optimizer.zero_grad()
         total_loss_value = 0.0
@@ -371,6 +404,11 @@ class DeepAIFAgent:
 
                 post_mean, post_std = wm.get_kl_stats(post)
                 prior_mean, prior_std = wm.get_kl_stats(prior)
+                bbox_t = (
+                    obstacle_bbox[:, t].to(self._device)
+                    if (obstacle_bbox is not None and img_recon_obs_w > 1.0)
+                    else None
+                )
                 loss, info = compute_vfe(
                     post_mean,
                     post_std,
@@ -384,7 +422,17 @@ class DeepAIFAgent:
                     kl_dyn_scale=cfg.kl_dyn_scale,
                     kl_rep_scale=cfg.kl_rep_scale,
                     token_kl_weighting=token_kl_weighting,
+                    obstacle_bbox=bbox_t,
+                    img_recon_obstacle_weight=img_recon_obs_w,
                 )
+
+                # Stage-2 transition: encoder/decoders are frozen, so img_loss
+                # and state_loss must not drive the backward pass.  Subtracting
+                # the (same) tensors removes their gradient contribution exactly,
+                # leaving only the KL terms (+ overshoot + rollout_recon below).
+                # img_loss/state_loss remain in `info` for monitoring/logging.
+                if self._stage == "transition":
+                    loss = loss - info["img_loss"] - info["state_loss"]
 
                 # A1: warp smoothness regularization (set by last img_step call)
                 if warp_smoothness_weight > 0 and hasattr(wm.rssm, "warp_smoothness_loss"):
@@ -495,6 +543,115 @@ class DeepAIFAgent:
 
         return {k: v / T for k, v in accum.items()} | {"total_loss": total_loss_value}
 
+    @staticmethod
+    def _det_state(post):
+        """Return a copy of an RSSM/Token state with stoch replaced by its mean.
+
+        Removes sampling noise so reconstruction is deterministic.
+        """
+        if hasattr(post, "token_mean"):
+            return type(post)(deter=post.deter, stoch=post.token_mean,
+                             mean=post.mean, std=post.std,
+                             token_mean=post.token_mean, token_std=post.token_std)
+        return type(post)(deter=post.deter, stoch=post.mean,
+                         mean=post.mean, std=post.std)
+
+    def update_ae(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+        obstacle_labels: Tensor | None = None,
+        obstacle_bbox: Tensor | None = None,
+    ) -> dict[str, float]:
+        """Stage-1 autoencoder update: train encoder + obs_decoder + state_decoder.
+
+        Posterior is obtained via obs_step (same as update) but decoded
+        deterministically (stoch = mean); the prior prediction is unused.
+        Loss = img_loss + state_loss + ae_kl_rep * KL(posterior ‖ N(0,1)).
+        The optimizer (built in __init__ for stage="ae") contains only the
+        encoder + decoders, so the RSSM transition is not trained here.
+        """
+        from torch.distributions import Normal, kl_divergence
+
+        B, T = images.shape[0], images.shape[1]
+        wm = self.world_model
+        cfg = self._cfg.training
+        ae_kl_rep = getattr(cfg, "ae_kl_rep", 0.0)
+        img_recon_obs_w = getattr(cfg, "img_recon_obstacle_weight", 1.0)
+
+        self._optimizer.zero_grad()
+        total_loss_value = 0.0
+        accum = {"img_loss": 0.0, "state_loss": 0.0, "kl_rep": 0.0}
+
+        prev_state = wm.rssm.initial(B, self._device)
+
+        for t in range(T):
+            img_t = wm.preprocess_image(images[:, t].to(self._device))
+            st_t  = states[:, t].to(self._device)
+            act_t = actions[:, t].to(self._device)
+
+            with torch.amp.autocast("cuda", enabled=self._use_amp):
+                embed = wm.encoder(img_t, st_t)
+                post, _prior = wm.rssm.obs_step(prev_state, act_t, embed)
+
+                det_post   = self._det_state(post)
+                feat       = wm.rssm.get_feat(det_post)
+                recon_img  = wm.decode_obs(det_post)
+                recon_state = wm.state_decoder(feat)
+
+                # Image reconstruction (with optional obstacle bbox upweight)
+                err = (recon_img - img_t).pow(2)  # (B,C,H,W)
+                if img_recon_obs_w > 1.0 and obstacle_bbox is not None:
+                    w_map = self._bbox_weight_map(
+                        obstacle_bbox[:, t].to(self._device), recon_img.shape,
+                        img_recon_obs_w, self._device,
+                    )
+                    err = err * w_map
+                c, h, w = img_t.shape[1], img_t.shape[2], img_t.shape[3]
+                img_loss = err.sum(dim=(1, 2, 3)).mean() / (c * h * w)
+
+                from active_inference.utils.transforms import symlog
+                state_loss = nn.functional.mse_loss(
+                    symlog(recon_state), symlog(st_t),
+                )
+
+                # Weak VAE-style posterior regularization toward N(0,1)
+                p_mean, p_std = wm.get_kl_stats(post)
+                kl_rep = kl_divergence(
+                    Normal(p_mean, p_std),
+                    Normal(torch.zeros_like(p_mean), torch.ones_like(p_std)),
+                ).sum(-1).mean()
+
+                loss = img_loss + state_loss + ae_kl_rep * kl_rep
+
+            if torch.isnan(loss) or torch.isinf(loss):
+                prev_state = type(post)(*[x.detach() for x in post])
+                continue
+
+            scaled_loss = loss / T
+            if self._scaler is not None:
+                self._scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
+            total_loss_value += loss.item() / T
+            accum["img_loss"]   += img_loss.item() / T
+            accum["state_loss"] += state_loss.item() / T
+            accum["kl_rep"]     += kl_rep.item() / T
+
+            prev_state = type(post)(*[x.detach() for x in post])
+
+        if self._scaler is not None:
+            self._scaler.unscale_(self._optimizer)
+            nn.utils.clip_grad_norm_(self._optimizer.param_groups[0]["params"], cfg.grad_clip)
+            self._scaler.step(self._optimizer)
+            self._scaler.update()
+        else:
+            nn.utils.clip_grad_norm_(self._optimizer.param_groups[0]["params"], cfg.grad_clip)
+            self._optimizer.step()
+
+        return accum | {"total_loss": total_loss_value}
+
     def save_checkpoint(self, path: str | Path):
         torch.save(
             {
@@ -508,6 +665,27 @@ class DeepAIFAgent:
             },
             path,
         )
+
+    def load_encoder_decoder(self, path: str | Path):
+        """Load ONLY encoder + obs_decoder + state_decoder weights from a
+        stage-1 (ae) checkpoint.  Leaves the RSSM transition and the optimizer
+        untouched — used by stage-2 (transition) training via --init_from.
+        """
+        ckpt = torch.load(path, map_location=self._device, weights_only=False)
+        full_sd = ckpt["world_model"]
+        wm = self.world_model
+        loaded = []
+        for prefix, module in (
+            ("encoder.", wm.encoder),
+            ("obs_decoder.", wm.obs_decoder),
+            ("state_decoder.", wm.state_decoder),
+        ):
+            sub = {k[len(prefix):]: v for k, v in full_sd.items()
+                   if k.startswith(prefix)}
+            if sub:
+                module.load_state_dict(sub)
+                loaded.append(prefix.rstrip("."))
+        print(f"  Loaded encoder-decoder from {path}: {loaded}")
 
     def load_checkpoint(self, path: str | Path):
         ckpt = torch.load(path, map_location=self._device, weights_only=False)
