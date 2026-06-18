@@ -103,6 +103,9 @@ def build_checkpoint(
     best_loss: float | None,
     checkpoint_type: str,
     is_best: bool,
+    val_metrics: dict[str, float] | None = None,
+    selection_loss: float | None = None,
+    stage: str | None = None,
 ) -> dict:
     """Build a checkpoint dict with metadata.
 
@@ -132,6 +135,14 @@ def build_checkpoint(
         "best_loss": float(best_loss) if best_loss is not None else None,
         "train_loss": float(train_loss) if train_loss is not None else None,
         "val_loss": float(val_loss) if val_loss is not None else None,
+        # Per-term validation metrics (img/state/kl_dyn/kl_rep/rollout_recon)
+        # so each epoch's component losses are inspectable from the checkpoint.
+        "val_metrics": (
+            {k: float(v) for k, v in val_metrics.items()}
+            if val_metrics is not None else None
+        ),
+        "selection_loss": float(selection_loss) if selection_loss is not None else None,
+        "stage": stage,
         "config": _safe_config_to_dict(cfg),
         "world_model_type": getattr(getattr(cfg, "model", None), "world_model_type", None),
         "crop_road": getattr(getattr(cfg, "encoder", None), "crop_road", None),
@@ -512,6 +523,10 @@ def main():
     print(f"early_stop_min_delta: {args.early_stop_min_delta}")
     print("=" * 100)
 
+    # Defined before the loop so the final checkpoint is safe even at 0 epochs.
+    val_info = None
+    selection_loss = None
+
     for epoch in range(start_epoch, cfg.training.epochs):
         epoch_losses = []
         epoch_sel_losses = []
@@ -561,6 +576,7 @@ def main():
         writer.add_scalar("train/epoch_loss", mean_loss, epoch)
 
         val_sel_loss = None
+        val_info = None
         if valid_loader is not None:
             val_info = evaluate_world_model(agent, valid_loader)
             last_val_loss = val_info["total_loss"]
@@ -609,6 +625,9 @@ def main():
                     best_loss=best_loss,
                     checkpoint_type="best",
                     is_best=True,
+                    val_metrics=val_info,
+                    selection_loss=selection_loss,
+                    stage=args.stage,
                 ),
                 str(ckpt_dir / "best.pt"),
             )
@@ -667,6 +686,9 @@ def main():
                     best_loss=best_loss if best_loss < float("inf") else None,
                     checkpoint_type="epoch",
                     is_best=improved,
+                    val_metrics=val_info,
+                    selection_loss=selection_loss,
+                    stage=args.stage,
                 ),
                 str(ckpt_dir / f"epoch_{epoch + 1}.pt"),
             )
@@ -727,6 +749,9 @@ def main():
             best_loss=best_loss if best_loss < float("inf") else None,
             checkpoint_type="final_early_stop" if stopped_early else "final",
             is_best=False,
+            val_metrics=val_info,
+            selection_loss=selection_loss,
+            stage=args.stage,
         ),
         str(ckpt_dir / "final.pt"),
     )
