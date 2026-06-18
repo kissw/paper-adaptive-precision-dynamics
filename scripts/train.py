@@ -151,6 +151,23 @@ def build_checkpoint(
 
 
 @torch.no_grad()
+def stage_selection_loss(stage: str, info: dict[str, float]) -> float:
+    """Pick the best.pt selection scalar appropriate to the training stage.
+
+    ae         : img_loss + state_loss  (reconstruction is the AE objective;
+                 the untrained transition's huge KL must not dominate selection).
+    transition : kl_dyn + rollout_recon  (frozen recon is monitoring-only; the
+                 prior's predictive quality is what improves).  If free_nats
+                 clamps kl_dyn to a floor, rollout_recon carries the signal.
+    joint      : total_loss  (original full VFE behaviour — regression).
+    """
+    if stage == "ae":
+        return float(info.get("img_loss", 0.0) + info.get("state_loss", 0.0))
+    if stage == "transition":
+        return float(info.get("kl_dyn", 0.0) + info.get("rollout_recon", 0.0))
+    return float(info["total_loss"])
+
+
 def evaluate_world_model(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
     """Evaluate world-model VFE on a held-out HDF5 split.
 
@@ -165,6 +182,9 @@ def evaluate_world_model(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
     device = agent._device
     cfg = agent._cfg.training
     beta_obstacle_aux = getattr(cfg, "beta_obstacle_aux", 0.0)
+    rr_horizon = getattr(cfg, "rollout_recon_horizon", 0)
+    rr_weight = getattr(cfg, "rollout_recon_weight", 0.0)
+    eval_rollout = rr_horizon > 0 and rr_weight > 0.0
 
     was_training = wm.training
     wm.eval()
@@ -177,6 +197,7 @@ def evaluate_world_model(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
         "kl_dyn": 0.0,
         "kl_rep": 0.0,
         "obs_aux_loss": 0.0,
+        "rollout_recon": 0.0,
     }
 
     for batch in tqdm(dataloader, desc="Validation", leave=False):
@@ -196,6 +217,7 @@ def evaluate_world_model(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
             "kl_dyn": 0.0,
             "kl_rep": 0.0,
             "obs_aux_loss": 0.0,
+            "rollout_recon": 0.0,
         }
         valid_steps = 0
 
@@ -240,6 +262,22 @@ def evaluate_world_model(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
                     loss = loss + beta_obstacle_aux * obs_aux
                     obs_aux_loss_val = obs_aux.item()
 
+            # Multi-step pixel rollout reconstruction (eval, no backward).
+            # Needed so transition-stage selection can use rollout quality.
+            rr_val = 0.0
+            if eval_rollout and t + 1 < T:
+                n_rr = min(rr_horizon, T - 1 - t)
+                if n_rr > 0:
+                    s_rr = post
+                    rr_sum = 0.0
+                    for h in range(1, n_rr + 1):
+                        a_rr = actions[:, t + h].to(device)
+                        s_rr = wm.rssm.img_step(s_rr, a_rr)
+                        rec = wm.decode_obs(s_rr)
+                        tgt = wm.preprocess_image(images[:, t + h].to(device))
+                        rr_sum += (rec - tgt).pow(2).mean().item()
+                    rr_val = rr_sum / n_rr
+
             if torch.isnan(loss) or torch.isinf(loss):
                 prev_state = type(post)(*[x.detach() for x in post])
                 continue
@@ -248,6 +286,7 @@ def evaluate_world_model(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
             for k in ["img_loss", "state_loss", "kl_dyn", "kl_rep"]:
                 batch_accum[k] += info[k].item()
             batch_accum["obs_aux_loss"] += obs_aux_loss_val
+            batch_accum["rollout_recon"] += rr_val
             valid_steps += 1
 
             prev_state = type(post)(*[x.detach() for x in post])
@@ -475,6 +514,7 @@ def main():
 
     for epoch in range(start_epoch, cfg.training.epochs):
         epoch_losses = []
+        epoch_sel_losses = []
         completed_epoch = epoch + 1
 
         for batch_idx, batch in enumerate(
@@ -506,29 +546,47 @@ def main():
                 continue
 
             epoch_losses.append(info["total_loss"])
+            epoch_sel_losses.append(stage_selection_loss(args.stage, info))
             global_step += 1
 
             for k, v in info.items():
                 writer.add_scalar(f"train/{k}", v, global_step)
 
         mean_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
+        mean_sel_loss = (
+            sum(epoch_sel_losses) / len(epoch_sel_losses)
+            if epoch_sel_losses else 0.0
+        )
         print(f"Epoch {epoch + 1}/{cfg.training.epochs} | Loss: {mean_loss:.4f}")
         writer.add_scalar("train/epoch_loss", mean_loss, epoch)
 
+        val_sel_loss = None
         if valid_loader is not None:
             val_info = evaluate_world_model(agent, valid_loader)
             last_val_loss = val_info["total_loss"]
+            val_sel_loss = stage_selection_loss(args.stage, val_info)
             for k, v in val_info.items():
                 writer.add_scalar(f"valid/{k}", v, epoch)
+            writer.add_scalar("valid/selection_loss", val_sel_loss, epoch)
             print(
                 f"  Validation | Loss: {last_val_loss:.4f} "
                 f"img={val_info['img_loss']:.4f} "
                 f"state={val_info['state_loss']:.4f} "
                 f"kl_dyn={val_info['kl_dyn']:.4f} "
-                f"kl_rep={val_info['kl_rep']:.4f}"
+                f"kl_rep={val_info['kl_rep']:.4f} "
+                f"rollout_recon={val_info['rollout_recon']:.4f} "
+                f"| sel[{args.stage}]={val_sel_loss:.4f}"
             )
 
-        selection_loss = last_val_loss if valid_loader is not None else mean_loss
+        # Stage-aware best.pt selection:
+        #   ae         → img+state recon
+        #   transition → kl_dyn + rollout_recon
+        #   joint      → full VFE total_loss
+        # Falls back to the train-side stage selection when no valid split.
+        if valid_loader is not None:
+            selection_loss = val_sel_loss
+        else:
+            selection_loss = mean_sel_loss
 
         improved = False
         if selection_loss is not None:

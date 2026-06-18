@@ -113,6 +113,41 @@ class TestTransitionStage:
         assert not torch.allclose(rssm0, next(a.world_model.rssm.parameters()))
 
 
+class TestStageSelectionLoss:
+    def _sel(self):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        from train import stage_selection_loss
+        return stage_selection_loss
+
+    def test_ae_uses_recon_ignores_kl(self):
+        sel = self._sel()
+        info = {"img_loss": 0.0015, "state_loss": 0.01,
+                "kl_dyn": 1800.0, "kl_rep": 1800.0, "total_loss": 3601.0,
+                "rollout_recon": 0.0}
+        assert abs(sel("ae", info) - 0.0115) < 1e-9
+
+    def test_ae_best_epoch_tracks_img(self):
+        """epoch16 (img 0.0015) must beat epoch7 (img 0.0021)."""
+        sel = self._sel()
+        e16 = {"img_loss": 0.0015, "state_loss": 0.0, "total_loss": 99.0,
+               "kl_dyn": 5.0, "rollout_recon": 0.0}
+        e7  = {"img_loss": 0.0021, "state_loss": 0.0, "total_loss": 1.0,
+               "kl_dyn": 5.0, "rollout_recon": 0.0}
+        assert sel("ae", e16) < sel("ae", e7)
+
+    def test_transition_uses_kldyn_plus_rollout(self):
+        sel = self._sel()
+        info = {"img_loss": 9.0, "state_loss": 9.0, "kl_dyn": 0.5,
+                "rollout_recon": 0.02, "total_loss": 18.52}
+        assert abs(sel("transition", info) - 0.52) < 1e-9
+
+    def test_joint_uses_total(self):
+        sel = self._sel()
+        assert sel("joint", {"total_loss": 1.23, "img_loss": 0.1}) == 1.23
+
+
 class TestLoadEncoderDecoder:
     def test_load_encoder_decoder_copies_weights(self, tmp_path):
         # Stage-1 agent, save checkpoint
