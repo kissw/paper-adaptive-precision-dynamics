@@ -179,16 +179,63 @@ def stage_selection_loss(stage: str, info: dict[str, float]) -> float:
     return float(info["total_loss"])
 
 
-def evaluate_world_model(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
-    """Evaluate world-model VFE on a held-out HDF5 split.
+def _evaluate_ae(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
+    """AE-stage validation: same deterministic forward as agent.update_ae.
 
-    This mirrors DeepAIFAgent.update() without optimizer/backward.
+    Uses agent.evaluate_ae_batch so the val img/state losses reflect the actual
+    reconstruction the AE optimizes, not the untrained-transition path.
+    """
+    wm = agent.world_model
+    was_training = wm.training
+    wm.eval()
+
+    totals = {"total_loss": 0.0, "img_loss": 0.0, "state_loss": 0.0,
+              "kl_dyn": 0.0, "kl_rep": 0.0, "obs_aux_loss": 0.0,
+              "rollout_recon": 0.0}
+    n_batches = 0
+
+    for batch in tqdm(dataloader, desc="Validation(ae)", leave=False):
+        if len(batch) == 4:
+            images, states, actions, _ = batch
+        else:
+            images, states, actions = batch
+        acc, valid_steps = agent.evaluate_ae_batch(images, states, actions)
+        if valid_steps == 0:
+            continue
+        n_batches += 1
+        img = acc["img_loss"] / valid_steps
+        state = acc["state_loss"] / valid_steps
+        kl_rep = acc["kl_rep"] / valid_steps
+        totals["img_loss"]   += img
+        totals["state_loss"] += state
+        totals["kl_rep"]     += kl_rep
+        # total_loss for ae monitoring = reconstruction (KL is monitoring-only)
+        totals["total_loss"] += img + state
+
+    if was_training:
+        wm.train()
+    if n_batches == 0:
+        return {k: float("nan") for k in totals}
+    return {k: v / n_batches for k, v in totals.items()}
+
+
+def evaluate_world_model(
+    agent: DeepAIFAgent, dataloader, stage: str = "joint",
+) -> dict[str, float]:
+    """Evaluate world-model losses on a held-out HDF5 split.
+
+    stage="ae"  → deterministic encode→decode path (mirrors update_ae) so val
+                  img/state reflect the AE reconstruction objective.
+    otherwise   → full VFE via the transition (obs_step) path.
 
     Dataset convention:
         action[t] is the action applied by env.step(action[t]) that produced
         image[t], state[t]. Therefore obs_step at timestep t is conditioned on
         actions[:, t], matching the fixed training path in agent.update().
     """
+    if stage == "ae":
+        return _evaluate_ae(agent, dataloader)
+
     wm = agent.world_model
     device = agent._device
     cfg = agent._cfg.training
@@ -578,7 +625,7 @@ def main():
         val_sel_loss = None
         val_info = None
         if valid_loader is not None:
-            val_info = evaluate_world_model(agent, valid_loader)
+            val_info = evaluate_world_model(agent, valid_loader, stage=args.stage)
             last_val_loss = val_info["total_loss"]
             val_sel_loss = stage_selection_loss(args.stage, val_info)
             for k, v in val_info.items():

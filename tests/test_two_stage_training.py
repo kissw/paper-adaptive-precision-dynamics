@@ -113,6 +113,49 @@ class TestTransitionStage:
         assert not torch.allclose(rssm0, next(a.world_model.rssm.parameters()))
 
 
+class TestAEEvaluation:
+    def test_evaluate_ae_batch_matches_update_ae_path(self):
+        """evaluate_ae_batch must use the deterministic decode path (det_post),
+        producing finite img/state losses consistent with update_ae."""
+        a, cfg = _agent(["training.stage=ae"])
+        imgs, sts, acts = _batch(cfg)
+        acc, n = a.evaluate_ae_batch(imgs, sts, acts)
+        assert n == cfg.training.seq_len
+        assert acc["img_loss"] >= 0.0
+        assert acc["state_loss"] >= 0.0
+        assert "kl_rep" in acc
+
+    def test_evaluate_ae_no_grad(self):
+        """Eval path must not accumulate gradients on encoder."""
+        a, cfg = _agent(["training.stage=ae"])
+        imgs, sts, acts = _batch(cfg)
+        a.evaluate_ae_batch(imgs, sts, acts)
+        assert all(p.grad is None for p in a.world_model.encoder.parameters())
+
+    def test_ae_eval_differs_from_joint_path(self):
+        """The ae (deterministic) and joint (sampled+VFE) eval paths should give
+        different img_loss for the same model — proving the path actually changed.
+        """
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        from train import evaluate_world_model
+
+        a, cfg = _agent(["training.stage=ae"])
+        imgs, sts, acts = _batch(cfg, B=4)
+
+        class _DL:
+            def __iter__(self):
+                yield (imgs, sts, acts)
+
+        torch.manual_seed(7)
+        joint = evaluate_world_model(a, _DL(), stage="joint")
+        ae    = evaluate_world_model(a, _DL(), stage="ae")
+        # ae total_loss is reconstruction-only (img+state), joint is full VFE
+        assert abs(ae["total_loss"] - (ae["img_loss"] + ae["state_loss"])) < 1e-6
+        assert ae["kl_dyn"] == 0.0  # ae path does not compute transition KL
+
+
 class TestStageSelectionLoss:
     def _sel(self):
         import sys

@@ -652,6 +652,67 @@ class DeepAIFAgent:
 
         return accum | {"total_loss": total_loss_value}
 
+    @torch.no_grad()
+    def evaluate_ae_batch(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+    ) -> tuple[dict[str, float], int]:
+        """Compute AE-stage losses on one batch with the SAME forward path as
+        update_ae (deterministic decode), without backward.
+
+        Returns (sum_over_valid_steps dict, valid_steps).  The caller averages.
+        Critically mirrors update_ae so validation img/state reflect the actual
+        reconstruction quality the AE stage optimizes — not the untrained
+        transition path used by the joint/transition evaluator.
+        """
+        from torch.distributions import Normal, kl_divergence
+        from active_inference.utils.transforms import symlog
+
+        B, T = images.shape[0], images.shape[1]
+        wm = self.world_model
+        prev_state = wm.rssm.initial(B, self._device)
+
+        acc = {"img_loss": 0.0, "state_loss": 0.0, "kl_rep": 0.0}
+        valid_steps = 0
+
+        for t in range(T):
+            img_t = wm.preprocess_image(images[:, t].to(self._device))
+            st_t  = states[:, t].to(self._device)
+            act_t = actions[:, t].to(self._device)
+
+            with torch.amp.autocast("cuda", enabled=self._use_amp):
+                embed = wm.encoder(img_t, st_t)
+                post, _prior = wm.rssm.obs_step(prev_state, act_t, embed)
+
+                det_post    = self._det_state(post)
+                feat        = wm.rssm.get_feat(det_post)
+                recon_img   = wm.decode_obs(det_post)
+                recon_state = wm.state_decoder(feat)
+
+                c, h, w = img_t.shape[1], img_t.shape[2], img_t.shape[3]
+                img_loss = (recon_img - img_t).pow(2).sum(dim=(1, 2, 3)).mean() / (c * h * w)
+                state_loss = nn.functional.mse_loss(symlog(recon_state), symlog(st_t))
+
+                p_mean, p_std = wm.get_kl_stats(post)
+                kl_rep = kl_divergence(
+                    Normal(p_mean, p_std),
+                    Normal(torch.zeros_like(p_mean), torch.ones_like(p_std)),
+                ).sum(-1).mean()
+
+            if torch.isnan(img_loss) or torch.isinf(img_loss):
+                prev_state = type(post)(*[x.detach() for x in post])
+                continue
+
+            acc["img_loss"]   += img_loss.item()
+            acc["state_loss"] += state_loss.item()
+            acc["kl_rep"]     += kl_rep.item()
+            valid_steps += 1
+            prev_state = type(post)(*[x.detach() for x in post])
+
+        return acc, valid_steps
+
     def save_checkpoint(self, path: str | Path):
         torch.save(
             {
