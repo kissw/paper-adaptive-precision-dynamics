@@ -46,6 +46,9 @@ class TrainingConfig:
     rollout_recon_obstacle_weight: float = 1.0  # obstacle bbox pixel upweight (1=uniform)
     rollout_recon_step_decay: float = 0.0     # per-step weight decay; 0=uniform
     img_recon_obstacle_weight: float = 1.0    # 1-step img recon obstacle upweight (1=uniform)
+    warmup_steps: int = 0       # LR warmup steps (0=off); then cosine decay
+    min_lr_ratio: float = 0.0333  # cosine floor as fraction of peak lr (~1/30)
+    cycle_weight: float = 0.0   # transition: L2(rollout prior mean, posterior mean)
     stage: str = "joint"        # "joint" | "ae" | "transition" — two-stage training
     ae_kl_rep: float = 0.01     # stage-ae weak posterior KL toward N(0,1); 0=pure AE
 

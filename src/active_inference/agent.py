@@ -190,10 +190,48 @@ class DeepAIFAgent:
                 self.world_model.parameters(), lr=cfg.training.lr,
             )
 
+        # Mixed precision: prefer bf16 (no GradScaler, avoids fp16 overflow that
+        # produces NaN on large rollout-recon values); fall back to fp16+scaler.
         self._use_amp = "cuda" in str(self._device)
-        self._scaler = torch.amp.GradScaler("cuda") if self._use_amp else None
+        if self._use_amp and torch.cuda.is_bf16_supported():
+            self._amp_dtype = torch.bfloat16
+            self._scaler = None  # bf16 has fp32 exponent range; no loss scaling
+        elif self._use_amp:
+            self._amp_dtype = torch.float16
+            self._scaler = torch.amp.GradScaler("cuda")
+        else:
+            self._amp_dtype = torch.float32
+            self._scaler = None
         self._prev_state: RSSMState | None = None
         self._prev_action: Tensor | None = None
+        self._scheduler = None
+
+    def attach_scheduler(self, total_steps: int):
+        """Build a warmup→cosine-decay LR schedule on the current optimizer.
+
+        Steps are advanced inside update()/update_ae() after optimizer.step().
+        No-op when training.warmup_steps <= 0 (constant LR — regression).
+        """
+        import math as _math
+        from torch.optim.lr_scheduler import LambdaLR
+
+        warmup = int(getattr(self._cfg.training, "warmup_steps", 0))
+        if warmup <= 0:
+            self._scheduler = None
+            return None
+        min_ratio = float(getattr(self._cfg.training, "min_lr_ratio", 0.0333))
+        total_steps = max(total_steps, warmup + 1)
+
+        def lr_lambda(step: int) -> float:
+            if step < warmup:
+                return (step + 1) / warmup
+            prog = (step - warmup) / max(1, total_steps - warmup)
+            prog = min(1.0, prog)
+            cos = 0.5 * (1.0 + _math.cos(_math.pi * prog))
+            return min_ratio + (1.0 - min_ratio) * cos
+
+        self._scheduler = LambdaLR(self._optimizer, lr_lambda)
+        return self._scheduler
 
     def freeze_encoder_decoder(self):
         """Freeze encoder + obs_decoder + state_decoder (stage-2 transition).
@@ -353,23 +391,30 @@ class DeepAIFAgent:
         rollout_recon_obs_w = getattr(cfg, "rollout_recon_obstacle_weight", 1.0)
         rollout_recon_decay = getattr(cfg, "rollout_recon_step_decay", 0.0)
         img_recon_obs_w = getattr(cfg, "img_recon_obstacle_weight", 1.0)
+        cycle_weight = getattr(cfg, "cycle_weight", 0.0)
+        rr_horizon_eff = max(rollout_recon_horizon, overshoot_horizon)
 
         self._optimizer.zero_grad()
         total_loss_value = 0.0
         accum = {
             "img_loss": 0.0, "state_loss": 0.0,
             "kl_dyn": 0.0, "kl_rep": 0.0, "obs_aux_loss": 0.0,
-            "overshoot_kl": 0.0, "rollout_recon": 0.0,
+            "overshoot_kl": 0.0, "rollout_recon": 0.0, "cycle": 0.0,
         }
 
-        # ── 1st pass: collect stop-grad posterior references for overshooting ──
+        # ── 1st pass: collect stop-grad posterior references ──────────────────
         # Runs encoder + obs_step once under no_grad to build the target list.
-        # posteriors_ref[t].mean/.std are used as fixed KL targets in 2nd pass.
+        # posteriors_ref[t].mean/.std are fixed targets for overshoot KL and the
+        # cycle loss (rollout prior mean vs posterior mean).
         posteriors_ref: list[RSSMState] = []
-        if overshoot_horizon > 0 and overshoot_weight > 0.0:
+        _need_ref = (
+            (overshoot_horizon > 0 and overshoot_weight > 0.0)
+            or (cycle_weight > 0.0)
+        )
+        if _need_ref:
             prev_s = wm.rssm.initial(B, self._device)
             with torch.no_grad():
-                with torch.amp.autocast("cuda", enabled=self._use_amp):
+                with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
                     for t in range(T):
                         img_ref = wm.preprocess_image(images[:, t].to(self._device))
                         st_ref = states[:, t].to(self._device)
@@ -392,7 +437,7 @@ class DeepAIFAgent:
             st_t = states[:, t].to(self._device)
             act_t = actions[:, t].to(self._device)
 
-            with torch.amp.autocast("cuda", enabled=self._use_amp):
+            with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
                 embed = wm.encoder(img_t, st_t)
                 post, prior = wm.rssm.obs_step(
                     prev_state, act_t, embed,
@@ -444,34 +489,56 @@ class DeepAIFAgent:
                 # and compare decoded images to GT future frames.  Trains the prior
                 # decoder to produce visually coherent futures.
                 rr_val = 0.0
-                if rollout_recon_horizon > 0 and rollout_recon_weight > 0.0:
-                    n_rr = min(rollout_recon_horizon, T - 1 - t)
+                cycle_val = 0.0
+                do_rr = rollout_recon_horizon > 0 and rollout_recon_weight > 0.0
+                do_cycle = cycle_weight > 0.0 and bool(posteriors_ref)
+                if (do_rr or do_cycle) and t + 1 < T:
+                    n_rr = min(rr_horizon_eff, T - 1 - t)
                     if n_rr > 0:
                         state_rr = post
-                        rr_loss  = torch.zeros((), device=self._device)
+                        rr_loss    = torch.zeros((), device=self._device)
+                        cycle_loss = torch.zeros((), device=self._device)
+                        n_cyc = 0
                         for h in range(1, n_rr + 1):
                             act_rr    = actions[:, t + h].to(self._device)
                             state_rr  = wm.rssm.img_step(state_rr, act_rr)
-                            recon_rr  = wm.decode_obs(state_rr)
-                            target_rr = wm.preprocess_image(
-                                images[:, t + h].to(self._device)
-                            )
-                            mse_rr = (recon_rr - target_rr).pow(2)  # (B,C,H,W)
-                            # Obstacle bbox pixel upweighting (if bbox provided)
-                            if rollout_recon_obs_w > 1.0 and obstacle_bbox is not None:
-                                w_map = self._bbox_weight_map(
-                                    obstacle_bbox[:, t + h],
-                                    recon_rr.shape,
-                                    rollout_recon_obs_w,
-                                    self._device,
-                                )  # (B,1,H,W)
-                                mse_rr = mse_rr * w_map
-                            # Optional per-step decay (0=uniform weight)
-                            step_w = (1.0 - rollout_recon_decay) ** (h - 1)
-                            rr_loss = rr_loss + step_w * mse_rr.mean()
-                        rr_loss = rr_loss / n_rr
-                        loss    = loss + rollout_recon_weight * rr_loss
-                        rr_val  = rr_loss.item()
+
+                            # Cycle loss: rollout prior mean ↔ stop-grad posterior
+                            # mean at t+h.  Anchors the open-loop prior to the
+                            # filtered (posterior) trajectory → stabilizes rollout.
+                            if do_cycle and h <= overshoot_horizon and t + h < len(posteriors_ref):
+                                pm, _ = wm.get_kl_stats(state_rr)
+                                qm, _ = wm.get_kl_stats(posteriors_ref[t + h])
+                                cycle_loss = cycle_loss + (pm - qm.detach()).pow(2).mean()
+                                n_cyc += 1
+
+                            if do_rr and h <= rollout_recon_horizon:
+                                recon_rr  = wm.decode_obs(state_rr)
+                                target_rr = wm.preprocess_image(
+                                    images[:, t + h].to(self._device)
+                                )
+                                mse_rr = (recon_rr - target_rr).pow(2)  # (B,C,H,W)
+                                if rollout_recon_obs_w > 1.0 and obstacle_bbox is not None:
+                                    w_map = self._bbox_weight_map(
+                                        obstacle_bbox[:, t + h],
+                                        recon_rr.shape,
+                                        rollout_recon_obs_w,
+                                        self._device,
+                                    )  # (B,1,H,W)
+                                    mse_rr = mse_rr * w_map
+                                step_w = (1.0 - rollout_recon_decay) ** (h - 1)
+                                rr_loss = rr_loss + step_w * mse_rr.mean()
+
+                        if do_rr:
+                            n_rr_used = min(rollout_recon_horizon, T - 1 - t)
+                            if n_rr_used > 0:
+                                rr_loss = rr_loss / n_rr_used
+                                loss    = loss + rollout_recon_weight * rr_loss
+                                rr_val  = rr_loss.item()
+                        if do_cycle and n_cyc > 0:
+                            cycle_loss = cycle_loss / n_cyc
+                            loss = loss + cycle_weight * cycle_loss
+                            cycle_val = cycle_loss.item()
 
                 # Auxiliary obstacle prediction loss
                 obs_aux_loss_val = 0.0
@@ -527,19 +594,27 @@ class DeepAIFAgent:
             accum["obs_aux_loss"] += obs_aux_loss_val
             accum["overshoot_kl"] += osh_kl_val
             accum["rollout_recon"] += rr_val
+            accum["cycle"] += cycle_val
 
             prev_state = type(post)(
                 *[x.detach() for x in post],
             )
 
+        # Clip only the optimized parameters (rssm-only in transition stage).
+        clip_params = self._optimizer.param_groups[0]["params"]
         if self._scaler is not None:
             self._scaler.unscale_(self._optimizer)
-            nn.utils.clip_grad_norm_(wm.parameters(), cfg.grad_clip)
+            nn.utils.clip_grad_norm_(clip_params, cfg.grad_clip)
             self._scaler.step(self._optimizer)
             self._scaler.update()
         else:
-            nn.utils.clip_grad_norm_(wm.parameters(), cfg.grad_clip)
+            nn.utils.clip_grad_norm_(clip_params, cfg.grad_clip)
             self._optimizer.step()
+
+        # LR scheduler step (set by train.py via attach_scheduler), if any.
+        sched = getattr(self, "_scheduler", None)
+        if sched is not None:
+            sched.step()
 
         return {k: v / T for k, v in accum.items()} | {"total_loss": total_loss_value}
 
@@ -591,7 +666,7 @@ class DeepAIFAgent:
             st_t  = states[:, t].to(self._device)
             act_t = actions[:, t].to(self._device)
 
-            with torch.amp.autocast("cuda", enabled=self._use_amp):
+            with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
                 embed = wm.encoder(img_t, st_t)
                 post, _prior = wm.rssm.obs_step(prev_state, act_t, embed)
 
@@ -641,14 +716,19 @@ class DeepAIFAgent:
 
             prev_state = type(post)(*[x.detach() for x in post])
 
+        clip_params = self._optimizer.param_groups[0]["params"]
         if self._scaler is not None:
             self._scaler.unscale_(self._optimizer)
-            nn.utils.clip_grad_norm_(self._optimizer.param_groups[0]["params"], cfg.grad_clip)
+            nn.utils.clip_grad_norm_(clip_params, cfg.grad_clip)
             self._scaler.step(self._optimizer)
             self._scaler.update()
         else:
-            nn.utils.clip_grad_norm_(self._optimizer.param_groups[0]["params"], cfg.grad_clip)
+            nn.utils.clip_grad_norm_(clip_params, cfg.grad_clip)
             self._optimizer.step()
+
+        sched = getattr(self, "_scheduler", None)
+        if sched is not None:
+            sched.step()
 
         return accum | {"total_loss": total_loss_value}
 
@@ -682,7 +762,7 @@ class DeepAIFAgent:
             st_t  = states[:, t].to(self._device)
             act_t = actions[:, t].to(self._device)
 
-            with torch.amp.autocast("cuda", enabled=self._use_amp):
+            with torch.amp.autocast("cuda", enabled=self._use_amp, dtype=self._amp_dtype):
                 embed = wm.encoder(img_t, st_t)
                 post, _prior = wm.rssm.obs_step(prev_state, act_t, embed)
 

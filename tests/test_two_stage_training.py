@@ -156,6 +156,55 @@ class TestAEEvaluation:
         assert ae["kl_dyn"] == 0.0  # ae path does not compute transition KL
 
 
+class TestStabilization:
+    def test_amp_dtype_selection_cpu(self):
+        """CPU: no amp, fp32, no scaler."""
+        a, _ = _agent()
+        assert a._use_amp is False
+        assert a._amp_dtype == torch.float32
+        assert a._scaler is None
+
+    def test_scheduler_warmup_then_cosine(self):
+        a, _ = _agent([
+            "training.warmup_steps=5", "training.min_lr_ratio=0.1",
+            "training.lr=1e-3",
+        ])
+        a.attach_scheduler(total_steps=20)
+        lrs = []
+        for _ in range(20):
+            a._optimizer.step()
+            a._scheduler.step()
+            lrs.append(a._optimizer.param_groups[0]["lr"])
+        assert lrs[0] < lrs[4]          # warmup increasing
+        assert lrs[19] < lrs[4]         # cosine decaying
+        assert lrs[19] >= 1e-3 * 0.1 * 0.99  # ~ floor
+
+    def test_scheduler_off_when_no_warmup(self):
+        a, _ = _agent(["training.warmup_steps=0"])
+        assert a.attach_scheduler(100) is None
+        assert a._scheduler is None
+
+    def test_cycle_loss_off_by_default(self):
+        a, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.free_nats=0.0",
+        ])
+        info = a.update(*_batch(cfg))
+        assert info["cycle"] == 0.0
+
+    def test_cycle_loss_on_trains_rssm_frozen_encoder(self):
+        a, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.cycle_weight=0.1", "training.overshoot_horizon=3",
+        ])
+        rssm0 = next(a.world_model.rssm.parameters()).detach().clone()
+        enc0  = next(a.world_model.encoder.parameters()).detach().clone()
+        info = a.update(*_batch(cfg))
+        assert info["cycle"] > 0.0
+        assert not torch.allclose(rssm0, next(a.world_model.rssm.parameters()))
+        assert torch.allclose(enc0, next(a.world_model.encoder.parameters()))
+
+
 class TestStageSelectionLoss:
     def _sel(self):
         import sys

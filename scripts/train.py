@@ -526,6 +526,15 @@ def main():
                 start_epoch = int(m.group(1))
                 print(f"Auto-detected start epoch: {start_epoch}")
 
+    # LR schedule: warmup → cosine decay over the full run (after any resume,
+    # so the scheduler binds to the final optimizer instance).
+    total_train_steps = cfg.training.epochs * len(dataloader)
+    sched = agent.attach_scheduler(total_train_steps)
+    if sched is not None:
+        print(f"LR schedule: warmup={cfg.training.warmup_steps} "
+              f"min_lr_ratio={cfg.training.min_lr_ratio} "
+              f"total_steps={total_train_steps}")
+
     writer = SummaryWriter(str(output_dir / "tb_logs"))
 
     # Fixed diagnostic window (selected once so successive grids are comparable)
@@ -613,6 +622,9 @@ def main():
 
             for k, v in info.items():
                 writer.add_scalar(f"train/{k}", v, global_step)
+            writer.add_scalar(
+                "train/lr", agent._optimizer.param_groups[0]["lr"], global_step,
+            )
 
         mean_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
         mean_sel_loss = (

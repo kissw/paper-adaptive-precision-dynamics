@@ -103,6 +103,9 @@ training:
   img_recon_obstacle_weight: 1.0    # 1-step img recon obstacle upweight (1=uniform)
   stage: "joint"             # joint | ae | transition (two-stage training)
   ae_kl_rep: 0.01            # stage-ae weak posterior KL; 0=pure AE
+  warmup_steps: 0           # LR warmup steps (0=off) -> cosine decay
+  min_lr_ratio: 0.0333      # cosine floor (~1/30 of peak lr)
+  cycle_weight: 0.0         # transition: prior-mean vs posterior-mean L2
 
 evaluation:
   episodes: 5
