@@ -205,6 +205,88 @@ class TestStabilization:
         assert torch.allclose(enc0, next(a.world_model.encoder.parameters()))
 
 
+class TestObstacleTokenMask:
+    def test_bbox_maps_to_correct_tokens(self):
+        # bbox spans x[29.25,34.26] (cols 3,4), y[33.57,37.57] (row 4)
+        bbox = torch.tensor([[29.25, 33.57, 34.26, 37.57]])
+        m = DeepAIFAgent._bbox_token_mask(bbox, 64, 64, 8, torch.device("cpu"))
+        idx = set(m[0].nonzero().squeeze(-1).tolist())
+        assert idx == {35, 36}  # row4*8 + cols{3,4}
+
+    def test_nan_bbox_empty_mask(self):
+        m = DeepAIFAgent._bbox_token_mask(
+            torch.tensor([[float("nan")] * 4]), 64, 64, 8, torch.device("cpu"),
+        )
+        assert m.sum().item() == 0.0
+
+    def test_full_image_bbox_marks_all_tokens(self):
+        m = DeepAIFAgent._bbox_token_mask(
+            torch.tensor([[0.0, 0.0, 64.0, 64.0]]), 64, 64, 8, torch.device("cpu"),
+        )
+        assert m.sum().item() == 64.0
+
+
+class TestObstacleTokenWeight:
+    _VIT = [
+        "device=cpu", "training.seq_len=8", "training.batch_size=2",
+        "training.stage=transition", "training.kl_rep_scale=0.0",
+        "training.cycle_weight=0.1", "training.overshoot_horizon=3",
+        "token_vit.num_layers=1", "token_vit.num_prior_layers=1",
+        "token_vit.num_post_layers=1", "token_vit.embed_dim=32",
+        "token_vit.deter_dim=32", "token_vit.stoch_dim=8", "token_vit.feat_dim=40",
+        "token_vit.num_tokens=64", "token_vit.num_heads=4",
+        "rssm.stoch_dim=8", "rssm.deter_dim=32", "rssm.embed_dim=32",
+        "ensemble.num_heads=2", "ensemble.hidden_dim=32",
+    ]
+
+    def _batch(self, cfg, B=2):
+        T = cfg.training.seq_len
+        bb = torch.full((B, T, 4), float("nan"))
+        bb[:, :] = torch.tensor([29.25, 33.57, 34.26, 37.57])
+        return (torch.rand(B, T, 3, 64, 64) - 0.5,
+                torch.zeros(B, T, 4), torch.zeros(B, T, 2), None, bb)
+
+    def _cycle(self, w):
+        cfg = Config.from_yaml(
+            "configs/experiment/token_vit.yaml",
+            overrides=self._VIT + [f"training.obstacle_token_weight={w}"],
+        )
+        torch.manual_seed(0)
+        a = DeepAIFAgent(cfg)
+        b = self._batch(cfg)
+        torch.manual_seed(0)
+        return a.update(*b)["cycle"]
+
+    def test_weight_one_is_baseline(self):
+        # weight=1.0 must not error and produce a finite cycle value
+        c = self._cycle(1.0)
+        assert c >= 0.0
+
+    def test_weight_high_increases_cycle(self):
+        c1 = self._cycle(1.0)
+        c5 = self._cycle(5.0)
+        assert c5 > c1
+
+    def test_rssm_ignores_token_weight(self):
+        """RSSM (2D latent) must be identical regardless of token weight."""
+        def run(w):
+            cfg = Config.from_yaml(DEBUG_YAML, overrides=[
+                "training.stage=transition", "training.kl_rep_scale=0.0",
+                "training.cycle_weight=0.1", "training.overshoot_horizon=3",
+                f"training.obstacle_token_weight={w}",
+            ])
+            torch.manual_seed(0)
+            a = DeepAIFAgent(cfg)
+            T = cfg.training.seq_len
+            bb = torch.full((2, T, 4), float("nan"))
+            bb[:, :] = torch.tensor([29., 33., 34., 37.])
+            torch.manual_seed(0)
+            return a.update(torch.rand(2, T, 3, 64, 64) - 0.5,
+                            torch.zeros(2, T, 4), torch.zeros(2, T, 2),
+                            None, bb)["cycle"]
+        assert abs(run(1.0) - run(5.0)) < 1e-9
+
+
 class TestStageSelectionLoss:
     def _sel(self):
         import sys

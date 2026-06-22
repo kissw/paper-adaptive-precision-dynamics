@@ -366,6 +366,36 @@ class DeepAIFAgent:
             w_map[b, 0] = 1.0 + (obstacle_weight - 1.0) * mask.float()
         return w_map
 
+    @staticmethod
+    def _bbox_token_mask(
+        bbox: Tensor, num_tokens: int, image_size: int, patch_size: int, device,
+    ) -> Tensor:
+        """Map xyxy-pixel bbox to a (B, num_tokens) {0,1} token-overlap mask.
+
+        Token i covers image region
+            rows [(i//G)*P : (i//G+1)*P], cols [(i%G)*P : (i%G+1)*P]
+        with G = image_size//patch_size (=8 for 64/8).  Matches the raster
+        token order used by the ViT encoder/decoder.  NaN/degenerate bbox → all
+        zeros (no obstacle tokens → uniform weighting downstream).
+        """
+        B = bbox.shape[0]
+        G = image_size // patch_size
+        P = patch_size
+        mask = torch.zeros(B, num_tokens, device=device)
+        bbox = bbox.to(device).float()
+        for b in range(B):
+            x1, y1, x2, y2 = bbox[b]
+            if torch.isnan(bbox[b]).any() or x2 <= x1 or y2 <= y1:
+                continue
+            for i in range(num_tokens):
+                r, c = i // G, i % G
+                ty1, ty2 = r * P, (r + 1) * P
+                tx1, tx2 = c * P, (c + 1) * P
+                # overlap test (token region vs bbox)
+                if tx1 < x2 and tx2 > x1 and ty1 < y2 and ty2 > y1:
+                    mask[b, i] = 1.0
+        return mask
+
     def update(
         self,
         images: Tensor,
@@ -392,7 +422,15 @@ class DeepAIFAgent:
         rollout_recon_decay = getattr(cfg, "rollout_recon_step_decay", 0.0)
         img_recon_obs_w = getattr(cfg, "img_recon_obstacle_weight", 1.0)
         cycle_weight = getattr(cfg, "cycle_weight", 0.0)
+        obstacle_token_weight = getattr(cfg, "obstacle_token_weight", 1.0)
         rr_horizon_eff = max(rollout_recon_horizon, overshoot_horizon)
+        # ViT token-grid params for obstacle-token weighting in the cycle loss.
+        _tv = getattr(self._cfg, "token_vit", None)
+        _is_vit = wm._wm_type == "token_vit"
+        use_token_weight = (
+            obstacle_token_weight > 1.0 and _is_vit
+            and obstacle_bbox is not None
+        )
 
         self._optimizer.zero_grad()
         total_loss_value = 0.0
@@ -506,10 +544,20 @@ class DeepAIFAgent:
                             # Cycle loss: rollout prior mean ↔ stop-grad posterior
                             # mean at t+h.  Anchors the open-loop prior to the
                             # filtered (posterior) trajectory → stabilizes rollout.
+                            # For ViT, obstacle-overlap tokens are upweighted so
+                            # the prior matches the latent where the obstacle is.
                             if do_cycle and h <= overshoot_horizon and t + h < len(posteriors_ref):
                                 pm, _ = wm.get_kl_stats(state_rr)
                                 qm, _ = wm.get_kl_stats(posteriors_ref[t + h])
-                                cycle_loss = cycle_loss + (pm - qm.detach()).pow(2).mean()
+                                sq = (pm - qm.detach()).pow(2)  # (B,N,Z) ViT | (B,Z) RSSM
+                                if use_token_weight and pm.ndim == 3:
+                                    tok_mask = self._bbox_token_mask(
+                                        obstacle_bbox[:, t + h], pm.shape[1],
+                                        _tv.image_size, _tv.patch_size, self._device,
+                                    )  # (B, N)
+                                    w_tok = 1.0 + (obstacle_token_weight - 1.0) * tok_mask
+                                    sq = sq * w_tok.unsqueeze(-1)  # (B,N,1) broadcast
+                                cycle_loss = cycle_loss + sq.mean()
                                 n_cyc += 1
 
                             if do_rr and h <= rollout_recon_horizon:
