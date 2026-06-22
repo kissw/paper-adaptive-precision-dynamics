@@ -63,6 +63,22 @@ def _select_diag_window(h5_path: str, seq_len: int, start_idx: int | None):
     return images, states, actions, local_start
 
 
+def _unpack_batch(batch):
+    """Normalise a dataset batch to (images, states, actions, obs_labels, bbox).
+
+    Supports 3/4/5-tuples for backward compatibility; missing fields are None.
+    """
+    if len(batch) == 5:
+        images, states, actions, obs_labels, bbox = batch
+    elif len(batch) == 4:
+        images, states, actions, obs_labels = batch
+        bbox = None
+    else:
+        images, states, actions = batch
+        obs_labels, bbox = None, None
+    return images, states, actions, obs_labels, bbox
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
@@ -195,10 +211,7 @@ def _evaluate_ae(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
     n_batches = 0
 
     for batch in tqdm(dataloader, desc="Validation(ae)", leave=False):
-        if len(batch) == 4:
-            images, states, actions, _ = batch
-        else:
-            images, states, actions = batch
+        images, states, actions, _, _ = _unpack_batch(batch)
         acc, valid_steps = agent.evaluate_ae_batch(images, states, actions)
         if valid_steps == 0:
             continue
@@ -258,12 +271,10 @@ def evaluate_world_model(
         "rollout_recon": 0.0,
     }
 
+    img_recon_obs_w = getattr(cfg, "img_recon_obstacle_weight", 1.0)
+
     for batch in tqdm(dataloader, desc="Validation", leave=False):
-        if len(batch) == 4:
-            images, states, actions, obs_labels = batch
-        else:
-            images, states, actions = batch
-            obs_labels = None
+        images, states, actions, obs_labels, obstacle_bbox = _unpack_batch(batch)
 
         B, T = images.shape[0], images.shape[1]
         prev_state = wm.rssm.initial(B, device)
@@ -295,6 +306,11 @@ def evaluate_world_model(
 
                 post_mean, post_std = wm.get_kl_stats(post)
                 prior_mean, prior_std = wm.get_kl_stats(prior)
+                bbox_t = (
+                    obstacle_bbox[:, t].to(device)
+                    if (obstacle_bbox is not None and img_recon_obs_w > 1.0)
+                    else None
+                )
                 loss, info = compute_vfe(
                     post_mean,
                     post_std,
@@ -307,6 +323,8 @@ def evaluate_world_model(
                     free_nats=cfg.free_nats,
                     kl_dyn_scale=cfg.kl_dyn_scale,
                     kl_rep_scale=cfg.kl_rep_scale,
+                    obstacle_bbox=bbox_t,
+                    img_recon_obstacle_weight=img_recon_obs_w,
                 )
 
                 obs_aux_loss_val = 0.0
@@ -591,17 +609,17 @@ def main():
         for batch_idx, batch in enumerate(
             tqdm(dataloader, desc=f"Epoch {epoch + 1}/{cfg.training.epochs}", leave=False)
         ):
-            # Dataset returns 3 or 4 tensors depending on obstacle labels
-            if len(batch) == 4:
-                images, states, actions, obs_labels = batch
-            else:
-                images, states, actions = batch
-                obs_labels = None
+            # Dataset returns 3/4/5 tensors (images, states, actions[, labels, bbox])
+            images, states, actions, obs_labels, obstacle_bbox = _unpack_batch(batch)
             try:
                 if args.stage == "ae":
-                    info = agent.update_ae(images, states, actions, obs_labels)
+                    info = agent.update_ae(
+                        images, states, actions, obs_labels, obstacle_bbox,
+                    )
                 else:
-                    info = agent.update(images, states, actions, obs_labels)
+                    info = agent.update(
+                        images, states, actions, obs_labels, obstacle_bbox,
+                    )
             except RuntimeError as e:
                 if "CUDA" in str(e):
                     print(f"\nCUDA error at epoch {epoch + 1}, batch {batch_idx}: {e}")

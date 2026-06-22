@@ -39,6 +39,19 @@ class SequenceDataset(Dataset):
                     dtype=torch.float32,
                 )
 
+            # Frame-level obstacle bounding boxes (xyxy pixel coords in model
+            # image space).  Used for obstacle-region recon upweighting.
+            # NaN rows (no visible obstacle) are treated as "no box" → the
+            # weight-map helper produces a uniform (all-ones) map.
+            if "obstacle_bbox" in f:
+                self._obstacle_bbox = torch.from_numpy(
+                    f["obstacle_bbox"][:].astype(np.float32)
+                )
+            else:
+                self._obstacle_bbox = torch.full(
+                    (self.total_samples, 4), float("nan"), dtype=torch.float32,
+                )
+
         self.valid_starts = []
         for i in range(self.total_samples - seq_len + 1):
             if self.episode_ids[i] == self.episode_ids[i + seq_len - 1]:
@@ -55,6 +68,7 @@ class SequenceDataset(Dataset):
             self._states[start:end],
             self._actions[start:end],
             self._obstacle_labels[start:end],
+            self._obstacle_bbox[start:end],
         )
 
 

@@ -68,3 +68,43 @@ def test_dataset_len(tmp_path):
     ds = SequenceDataset(path, seq_len=seq_len)
     expected = n_episodes * (episode_len - seq_len + 1)
     assert len(ds) == expected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# obstacle_bbox plumbing (xyxy pixel coords; NaN = no box → uniform weighting)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _write_h5(path, T, with_bbox):
+    import h5py
+    ep = np.zeros(T, dtype=np.int64)  # single episode
+    with h5py.File(path, "w") as f:
+        f.create_dataset("images", data=np.zeros((T, 3, 64, 64), dtype=np.float32))
+        f.create_dataset("states", data=np.zeros((T, 4), dtype=np.float32))
+        f.create_dataset("actions", data=np.zeros((T, 2), dtype=np.float32))
+        f.create_dataset("episode_ids", data=ep)
+        if with_bbox:
+            bb = np.full((T, 4), np.nan, dtype=np.float32)
+            bb[5] = [10.0, 12.0, 30.0, 34.0]  # one visible frame, xyxy pixels
+            f.create_dataset("obstacle_bbox", data=bb)
+
+
+def test_dataset_returns_bbox_5tuple(tmp_path):
+    p = str(tmp_path / "bb.h5")
+    _write_h5(p, T=20, with_bbox=True)
+    ds = SequenceDataset(p, seq_len=10)
+    item = ds[0]
+    assert len(item) == 5
+    bbox = item[4]
+    assert bbox.shape == (10, 4)
+    # frame 5 is a real box, others NaN
+    assert not torch.isnan(bbox[5]).any()
+    assert torch.isnan(bbox[0]).all()
+
+
+def test_dataset_missing_bbox_is_nan(tmp_path):
+    p = str(tmp_path / "nobb.h5")
+    _write_h5(p, T=20, with_bbox=False)
+    ds = SequenceDataset(p, seq_len=10)
+    bbox = ds[0][4]
+    assert bbox.shape == (10, 4)
+    assert torch.isnan(bbox).all()  # uniform weighting downstream
