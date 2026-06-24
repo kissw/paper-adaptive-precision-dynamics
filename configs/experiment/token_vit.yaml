@@ -106,6 +106,7 @@ training:
   warmup_steps: 0           # LR warmup steps (0=off) -> cosine decay
   min_lr_ratio: 0.0333      # cosine floor (~1/30 of peak lr)
   cycle_weight: 0.0         # transition: prior-mean vs posterior-mean L2
+  cycle_horizon: 5          # rollout steps cycle loss spans (indep. of overshoot)
   obstacle_token_weight: 1.0  # ViT: upweight obstacle-overlap tokens in cycle loss (1=off)
 
 evaluation:

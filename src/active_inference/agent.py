@@ -423,7 +423,11 @@ class DeepAIFAgent:
         img_recon_obs_w = getattr(cfg, "img_recon_obstacle_weight", 1.0)
         cycle_weight = getattr(cfg, "cycle_weight", 0.0)
         obstacle_token_weight = getattr(cfg, "obstacle_token_weight", 1.0)
-        rr_horizon_eff = max(rollout_recon_horizon, overshoot_horizon)
+        # Cycle loss runs along the rollout up to cycle_horizon (default 5),
+        # independent of overshoot_horizon (which defaults to 0).  The unified
+        # rollout loop must therefore span the max of all three horizons.
+        cycle_horizon = getattr(cfg, "cycle_horizon", 5)
+        rr_horizon_eff = max(rollout_recon_horizon, overshoot_horizon, cycle_horizon)
         # ViT token-grid params for obstacle-token weighting in the cycle loss.
         _tv = getattr(self._cfg, "token_vit", None)
         _is_vit = wm._wm_type == "token_vit"
@@ -546,7 +550,7 @@ class DeepAIFAgent:
                             # filtered (posterior) trajectory → stabilizes rollout.
                             # For ViT, obstacle-overlap tokens are upweighted so
                             # the prior matches the latent where the obstacle is.
-                            if do_cycle and h <= overshoot_horizon and t + h < len(posteriors_ref):
+                            if do_cycle and h <= cycle_horizon and t + h < len(posteriors_ref):
                                 pm, _ = wm.get_kl_stats(state_rr)
                                 qm, _ = wm.get_kl_stats(posteriors_ref[t + h])
                                 sq = (pm - qm.detach()).pow(2)  # (B,N,Z) ViT | (B,Z) RSSM
@@ -605,8 +609,12 @@ class DeepAIFAgent:
                 # Latent overshooting: D-step prior rollout vs stop-grad posteriors.
                 # wm.get_kl_stats() dispatches to (B,Z) for RSSM or (B,N,Z) for ViT,
                 # so compute_overshoot_kl works for both model types.
+                # Guard overshoot_horizon > 0: posteriors_ref may be populated
+                # solely for the cycle loss (overshoot off), in which case
+                # n_steps would be 0 and osh_kl/n_steps = 0/0 = NaN, poisoning
+                # the whole step's loss → NaN-guard skip → cycle/rollout dropped.
                 osh_kl_val = 0.0
-                if posteriors_ref and t + 1 < T:
+                if posteriors_ref and overshoot_horizon > 0 and t + 1 < T:
                     n_steps = min(overshoot_horizon, T - 1 - t)
                     state_d = post
                     osh_kl = torch.zeros((), device=self._device)

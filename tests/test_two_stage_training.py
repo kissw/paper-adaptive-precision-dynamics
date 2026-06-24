@@ -204,6 +204,33 @@ class TestStabilization:
         assert not torch.allclose(rssm0, next(a.world_model.rssm.parameters()))
         assert torch.allclose(enc0, next(a.world_model.encoder.parameters()))
 
+    def test_cycle_nonzero_with_overshoot_horizon_zero(self):
+        """Regression: cycle loss must run independent of overshoot_horizon.
+
+        Previously, populating posteriors_ref for the cycle loss made the
+        overshoot block (overshoot_horizon=0) compute osh_kl/0 = NaN, which
+        the NaN-guard then skipped — dropping cycle AND rollout_recon entirely.
+        """
+        a, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.cycle_weight=0.1", "training.cycle_horizon=5",
+            "training.rollout_recon_horizon=5", "training.rollout_recon_weight=1.0",
+            # overshoot_horizon stays 0 (default)
+        ])
+        info = a.update(*_batch(cfg))
+        assert info["cycle"] > 0.0, "cycle loss must be nonzero with overshoot_horizon=0"
+        assert info["rollout_recon"] > 0.0, "rollout_recon must not be dropped"
+        assert info["overshoot_kl"] == 0.0  # overshoot genuinely off
+
+    def test_cycle_horizon_independent_of_overshoot(self):
+        """cycle_horizon controls cycle span, not overshoot_horizon."""
+        a, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.cycle_weight=0.1", "training.cycle_horizon=4",
+        ])
+        info = a.update(*_batch(cfg))
+        assert info["cycle"] > 0.0
+
 
 class TestObstacleTokenMask:
     def test_bbox_maps_to_correct_tokens(self):
