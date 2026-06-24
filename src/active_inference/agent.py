@@ -369,6 +369,7 @@ class DeepAIFAgent:
     @staticmethod
     def _bbox_token_mask(
         bbox: Tensor, num_tokens: int, image_size: int, patch_size: int, device,
+        crop_road: bool = False, keep_bottom_frac: float = 0.6,
     ) -> Tensor:
         """Map xyxy-pixel bbox to a (B, num_tokens) {0,1} token-overlap mask.
 
@@ -377,16 +378,35 @@ class DeepAIFAgent:
         with G = image_size//patch_size (=8 for 64/8).  Matches the raster
         token order used by the ViT encoder/decoder.  NaN/degenerate bbox → all
         zeros (no obstacle tokens → uniform weighting downstream).
+
+        crop_road: the encoder sees crop_road(keep_bottom_frac) — top
+        (1-keep_bottom_frac) is dropped and the bottom band is stretched to
+        image_size.  bbox y-coords (in ORIGINAL pixels) are remapped into this
+        cropped space so tokens align with what the encoder/decoder actually
+        process.  x-coords are unchanged (crop_road only affects rows).  A bbox
+        entirely above the kept band degenerates → mask 0.
         """
         B = bbox.shape[0]
         G = image_size // patch_size
         P = patch_size
         mask = torch.zeros(B, num_tokens, device=device)
         bbox = bbox.to(device).float()
+
+        start = image_size * (1.0 - keep_bottom_frac)  # first kept row (orig)
+        crop_h = image_size - start                    # kept band height
+
         for b in range(B):
             x1, y1, x2, y2 = bbox[b]
             if torch.isnan(bbox[b]).any() or x2 <= x1 or y2 <= y1:
                 continue
+            if crop_road:
+                # Remap y into the cropped+resized model space (x unchanged).
+                y1 = (y1 - start) * image_size / crop_h
+                y2 = (y2 - start) * image_size / crop_h
+                y1 = max(0.0, float(y1))
+                y2 = min(float(image_size), float(y2))
+                if y2 <= y1:
+                    continue  # obstacle fell outside the kept band
             for i in range(num_tokens):
                 r, c = i // G, i % G
                 ty1, ty2 = r * P, (r + 1) * P
@@ -435,6 +455,9 @@ class DeepAIFAgent:
             obstacle_token_weight > 1.0 and _is_vit
             and obstacle_bbox is not None
         )
+        # crop_road remaps bbox y-coords so token mask aligns with encoder input.
+        _crop = bool(getattr(self._cfg.encoder, "crop_road", False))
+        _keep_frac = float(getattr(self._cfg.encoder, "keep_bottom_frac", 0.6))
 
         self._optimizer.zero_grad()
         total_loss_value = 0.0
@@ -558,6 +581,7 @@ class DeepAIFAgent:
                                     tok_mask = self._bbox_token_mask(
                                         obstacle_bbox[:, t + h], pm.shape[1],
                                         _tv.image_size, _tv.patch_size, self._device,
+                                        crop_road=_crop, keep_bottom_frac=_keep_frac,
                                     )  # (B, N)
                                     w_tok = 1.0 + (obstacle_token_weight - 1.0) * tok_mask
                                     sq = sq * w_tok.unsqueeze(-1)  # (B,N,1) broadcast

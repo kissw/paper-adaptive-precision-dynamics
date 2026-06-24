@@ -22,6 +22,7 @@ class EncoderConfig:
     image_size: int = 64
     state_dim: int = 2
     crop_road: bool = False
+    keep_bottom_frac: float = 0.6  # crop_road kept bottom fraction (matches transform default)
 
 
 @dataclass

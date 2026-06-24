@@ -252,6 +252,33 @@ class TestObstacleTokenMask:
         )
         assert m.sum().item() == 64.0
 
+    def test_crop_road_remaps_bbox_rows(self):
+        """crop_road=True remaps original y to the cropped+resized space.
+
+        bbox [29.25,33.57,34.26,37.57]: original rows ~4 (tokens 35,36).
+        After crop_road(0.6): kept band starts at y=25.6, so y→(y-25.6)*64/38.4
+        → 13.3..19.9 → rows 1-2 → tokens {11,12,19,20}.
+        """
+        bbox = torch.tensor([[29.25, 33.57, 34.26, 37.57]])
+        m_off = DeepAIFAgent._bbox_token_mask(
+            bbox, 64, 64, 8, torch.device("cpu"), crop_road=False,
+        )
+        assert set(m_off[0].nonzero().squeeze(-1).tolist()) == {35, 36}
+
+        m_on = DeepAIFAgent._bbox_token_mask(
+            bbox, 64, 64, 8, torch.device("cpu"),
+            crop_road=True, keep_bottom_frac=0.6,
+        )
+        assert set(m_on[0].nonzero().squeeze(-1).tolist()) == {11, 12, 19, 20}
+
+    def test_crop_road_obstacle_above_band_is_empty(self):
+        """bbox entirely above the kept band (y < 25.6) → degenerate → mask 0."""
+        above = torch.tensor([[29.0, 10.0, 34.0, 20.0]])
+        m = DeepAIFAgent._bbox_token_mask(
+            above, 64, 64, 8, torch.device("cpu"), crop_road=True,
+        )
+        assert m.sum().item() == 0.0
+
 
 class TestObstacleTokenWeight:
     _VIT = [
