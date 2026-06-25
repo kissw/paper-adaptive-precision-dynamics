@@ -190,18 +190,19 @@ class DeepAIFAgent:
                 self.world_model.parameters(), lr=cfg.training.lr,
             )
 
-        # Mixed precision: prefer bf16 (no GradScaler, avoids fp16 overflow that
-        # produces NaN on large rollout-recon values); fall back to fp16+scaler.
-        self._use_amp = "cuda" in str(self._device)
-        if self._use_amp and torch.cuda.is_bf16_supported():
+        # Mixed precision: bf16 only (never fp16).  Transition rollouts repeat
+        # img_step and produce large latent values; fp16's 65504 max overflows
+        # to Inf→NaN.  bf16 has the fp32 exponent range, so no overflow and no
+        # GradScaler is needed.  If bf16 is unsupported, fall back to fp32 — fp16
+        # is intentionally never used.
+        cuda_ok = "cuda" in str(self._device)
+        if cuda_ok and torch.cuda.is_bf16_supported():
+            self._use_amp = True
             self._amp_dtype = torch.bfloat16
-            self._scaler = None  # bf16 has fp32 exponent range; no loss scaling
-        elif self._use_amp:
-            self._amp_dtype = torch.float16
-            self._scaler = torch.amp.GradScaler("cuda")
         else:
+            self._use_amp = False
             self._amp_dtype = torch.float32
-            self._scaler = None
+        self._scaler = None  # never scale: bf16/fp32 both keep fp32 exponent range
         self._prev_state: RSSMState | None = None
         self._prev_action: Tensor | None = None
         self._scheduler = None

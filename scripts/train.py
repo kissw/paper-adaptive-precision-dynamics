@@ -296,7 +296,8 @@ def evaluate_world_model(
             st_t = states[:, t].to(device)
             act_t = actions[:, t].to(device)
 
-            with torch.amp.autocast("cuda", enabled=agent._use_amp):
+            with torch.amp.autocast("cuda", enabled=agent._use_amp,
+                                    dtype=agent._amp_dtype):
                 embed = wm.encoder(img_t, st_t)
                 post, prior = wm.rssm.obs_step(prev_state, act_t, embed)
 
