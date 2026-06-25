@@ -547,6 +547,8 @@ def main():
     # LR schedule: warmup → cosine decay over the full run (after any resume,
     # so the scheduler binds to the final optimizer instance).
     total_train_steps = cfg.training.epochs * len(dataloader)
+    # Resume the cycle_weight warmup counter so it doesn't restart from 0.
+    agent._train_step = start_epoch * len(dataloader)
     sched = agent.attach_scheduler(total_train_steps)
     if sched is not None:
         print(f"LR schedule: warmup={cfg.training.warmup_steps} "

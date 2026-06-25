@@ -204,6 +204,48 @@ class TestStabilization:
         assert not torch.allclose(rssm0, next(a.world_model.rssm.parameters()))
         assert torch.allclose(enc0, next(a.world_model.encoder.parameters()))
 
+    def test_cycle_warmup_ramps_in(self):
+        """cycle_warmup_steps=N: step 0 contributes nothing (ramp=0), later steps
+        do (ramp>0).  With only the cycle loss active, rssm stays put on step 0
+        then starts moving."""
+        a, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.free_nats=1.0",  # clamps kl_dyn → no grad from KL
+            "training.cycle_weight=0.5", "training.cycle_warmup_steps=4",
+        ])
+        w0 = torch.cat([p.flatten() for p in a.world_model.rssm.parameters()]).clone()
+        a.update(*_batch(cfg))               # step 0: ramp=0 → eff weight 0
+        w1 = torch.cat([p.flatten() for p in a.world_model.rssm.parameters()])
+        assert torch.allclose(w0, w1), "step 0 (ramp=0) must not move rssm"
+        a.update(*_batch(cfg))               # step 1: ramp=0.25 → cycle trains
+        w2 = torch.cat([p.flatten() for p in a.world_model.rssm.parameters()])
+        assert not torch.allclose(w1, w2), "step 1 (ramp>0) must move rssm"
+        assert a._train_step == 2
+
+    def test_cycle_warmup_zero_immediate(self):
+        """cycle_warmup_steps=0 → full cycle weight from step 0."""
+        a, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.free_nats=1.0",
+            "training.cycle_weight=0.5", "training.cycle_warmup_steps=0",
+        ])
+        w0 = torch.cat([p.flatten() for p in a.world_model.rssm.parameters()]).clone()
+        a.update(*_batch(cfg))
+        w1 = torch.cat([p.flatten() for p in a.world_model.rssm.parameters()])
+        assert not torch.allclose(w0, w1), "warmup=0 must train rssm on step 0"
+
+    def test_cycle_clamp_keeps_finite(self):
+        """Clamp(max=100) keeps cycle finite even with a poorly-init prior."""
+        a, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.cycle_weight=0.5", "training.cycle_warmup_steps=0",
+            "training.free_nats=0.0",
+        ])
+        info = a.update(*_batch(cfg))
+        assert info["cycle"] == info["cycle"]  # not NaN
+        import math
+        assert not math.isinf(info["cycle"])
+
     def test_cycle_nonzero_with_overshoot_horizon_zero(self):
         """Regression: cycle loss must run independent of overshoot_horizon.
 

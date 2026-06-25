@@ -205,6 +205,7 @@ class DeepAIFAgent:
         self._prev_state: RSSMState | None = None
         self._prev_action: Tensor | None = None
         self._scheduler = None
+        self._train_step = 0  # optimizer steps taken (for cycle_weight warmup)
 
     def attach_scheduler(self, total_steps: int):
         """Build a warmup→cosine-decay LR schedule on the current optimizer.
@@ -469,6 +470,14 @@ class DeepAIFAgent:
         # independent of overshoot_horizon (which defaults to 0).  The unified
         # rollout loop must therefore span the max of all three horizons.
         cycle_horizon = getattr(cfg, "cycle_horizon", 5)
+        # Linear cycle_weight warmup: ramp 0 → cycle_weight over warmup steps so
+        # the early prior (large latent error) does not blow up the loss.
+        cycle_warmup_steps = getattr(cfg, "cycle_warmup_steps", 0)
+        if cycle_warmup_steps > 0:
+            ramp = min(1.0, self._train_step / cycle_warmup_steps)
+        else:
+            ramp = 1.0
+        eff_cycle_weight = cycle_weight * ramp
         rr_horizon_eff = max(rollout_recon_horizon, overshoot_horizon, cycle_horizon)
         # ViT token-grid params for obstacle-token weighting in the cycle loss.
         _tv = getattr(self._cfg, "token_vit", None)
@@ -607,7 +616,9 @@ class DeepAIFAgent:
                                     )  # (B, N)
                                     w_tok = 1.0 + (obstacle_token_weight - 1.0) * tok_mask
                                     sq = sq * w_tok.unsqueeze(-1)  # (B,N,1) broadcast
-                                cycle_loss = cycle_loss + sq.mean()
+                                # Clamp per-step latent error so an early diverging
+                                # prior cannot explode the cycle loss.
+                                cycle_loss = cycle_loss + sq.mean().clamp(max=100.0)
                                 n_cyc += 1
 
                             if do_rr and h <= rollout_recon_horizon:
@@ -635,8 +646,8 @@ class DeepAIFAgent:
                                 rr_val  = rr_loss.item()
                         if do_cycle and n_cyc > 0:
                             cycle_loss = cycle_loss / n_cyc
-                            loss = loss + cycle_weight * cycle_loss
-                            cycle_val = cycle_loss.item()
+                            loss = loss + eff_cycle_weight * cycle_loss
+                            cycle_val = cycle_loss.item()  # raw (pre-weight) for monitoring
 
                 # Auxiliary obstacle prediction loss
                 obs_aux_loss_val = 0.0
@@ -717,6 +728,8 @@ class DeepAIFAgent:
         sched = getattr(self, "_scheduler", None)
         if sched is not None:
             sched.step()
+
+        self._train_step += 1  # advance cycle_weight warmup counter
 
         return {k: v / T for k, v in accum.items()} | {"total_loss": total_loss_value}
 
