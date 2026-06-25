@@ -232,13 +232,42 @@ class TestStabilization:
         assert info["cycle"] > 0.0
 
 
+class TestFlipBboxX:
+    def test_mirror_left_to_right(self):
+        # stored x near left → image x near right
+        bb = torch.tensor([[0.0, 42.8, 3.2, 60.4]])
+        f = DeepAIFAgent._flip_bbox_x(bb, 64)
+        assert abs(f[0, 0].item() - 60.8) < 1e-3   # 64 - 3.2
+        assert abs(f[0, 2].item() - 64.0) < 1e-3   # 64 - 0.0
+        # y unchanged
+        assert abs(f[0, 1].item() - 42.8) < 1e-3
+        assert abs(f[0, 3].item() - 60.4) < 1e-3
+
+    def test_nan_preserved(self):
+        f = DeepAIFAgent._flip_bbox_x(torch.tensor([[float("nan")] * 4]), 64)
+        assert torch.isnan(f).all()
+
+    def test_double_flip_identity(self):
+        bb = torch.tensor([[5.0, 10.0, 25.0, 40.0]])
+        ff = DeepAIFAgent._flip_bbox_x(DeepAIFAgent._flip_bbox_x(bb, 64), 64)
+        assert torch.allclose(ff, bb)
+
+
 class TestObstacleTokenMask:
     def test_bbox_maps_to_correct_tokens(self):
-        # bbox spans x[29.25,34.26] (cols 3,4), y[33.57,37.57] (row 4)
+        # bbox x[29.25,34.26] straddles the mirror axis (32), so x-flip keeps
+        # cols {3,4}; y[33.57,37.57] → row 4.  Tokens 35,36 either way.
         bbox = torch.tensor([[29.25, 33.57, 34.26, 37.57]])
         m = DeepAIFAgent._bbox_token_mask(bbox, 64, 64, 8, torch.device("cpu"))
         idx = set(m[0].nonzero().squeeze(-1).tolist())
         assert idx == {35, 36}  # row4*8 + cols{3,4}
+
+    def test_left_stored_bbox_masks_right_tokens(self):
+        # stored x near left [2,18] → mirrored to image x [46,62] = cols 5,6,7
+        bbox = torch.tensor([[2.0, 33.57, 18.0, 37.57]])
+        m = DeepAIFAgent._bbox_token_mask(bbox, 64, 64, 8, torch.device("cpu"))
+        cols = sorted({i % 8 for i in m[0].nonzero().squeeze(-1).tolist()})
+        assert min(cols) >= 5, f"mirrored box must be on right cols, got {cols}"
 
     def test_nan_bbox_empty_mask(self):
         m = DeepAIFAgent._bbox_token_mask(

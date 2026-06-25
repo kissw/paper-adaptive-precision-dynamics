@@ -343,6 +343,21 @@ class DeepAIFAgent:
         return self.step_with_info(obs_img, obs_state).action
 
     @staticmethod
+    def _flip_bbox_x(bbox: Tensor, image_size: int = 64) -> Tensor:
+        """Mirror bbox xyxy x-coords: x_new = image_size - x_old.
+
+        The obstacle_bbox is stored in CARLA camera coords (X = right), which is
+        left-right mirrored relative to image columns (col 0 = left).  Applying
+        this flip aligns bbox x with the actual obstacle position in the image.
+        Preserves NaN rows (NaN - x = NaN) so downstream NaN handling still works.
+        y-coords are unchanged.
+        """
+        out = bbox.clone()
+        out[..., 0] = image_size - bbox[..., 2]   # new x1 = img_size - old x2
+        out[..., 2] = image_size - bbox[..., 0]   # new x2 = img_size - old x1
+        return out
+
+    @staticmethod
     def _bbox_weight_map(
         bbox: Tensor, img_shape, obstacle_weight: float, device,
     ) -> Tensor:
@@ -354,6 +369,8 @@ class DeepAIFAgent:
         B, _, H, W = img_shape
         w_map = torch.ones(B, 1, H, W, device=device)
         bbox = bbox.to(device).float()
+        # Correct CARLA camera x-mirror so the box matches the image columns.
+        bbox = DeepAIFAgent._flip_bbox_x(bbox, W)
         ys = torch.arange(H, device=device).view(1, H, 1)
         xs = torch.arange(W, device=device).view(1, 1, W)
         for b in range(B):
@@ -383,14 +400,19 @@ class DeepAIFAgent:
         (1-keep_bottom_frac) is dropped and the bottom band is stretched to
         image_size.  bbox y-coords (in ORIGINAL pixels) are remapped into this
         cropped space so tokens align with what the encoder/decoder actually
-        process.  x-coords are unchanged (crop_road only affects rows).  A bbox
-        entirely above the kept band degenerates → mask 0.
+        process.  crop_road only affects rows.  A bbox entirely above the kept
+        band degenerates → mask 0.
+
+        x-coords are first mirrored (CARLA X=right vs image col 0=left) via
+        _flip_bbox_x so the box lands on the correct columns.
         """
         B = bbox.shape[0]
         G = image_size // patch_size
         P = patch_size
         mask = torch.zeros(B, num_tokens, device=device)
         bbox = bbox.to(device).float()
+        # Correct CARLA camera x-mirror (x only; y handled by crop remap below).
+        bbox = DeepAIFAgent._flip_bbox_x(bbox, image_size)
 
         start = image_size * (1.0 - keep_bottom_frac)  # first kept row (orig)
         crop_h = image_size - start                    # kept band height

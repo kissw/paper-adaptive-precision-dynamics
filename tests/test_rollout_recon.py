@@ -138,13 +138,16 @@ class TestImgReconObstacleWeight:
 
 class TestBboxWeightMap:
     def test_uniform_outside_bbox(self):
+        # _bbox_weight_map applies a CARLA x-mirror: stored x [10,30] maps to
+        # image columns [64-30, 64-10] = [34, 54]; y is unchanged [10,30].
         bbox = torch.tensor([[10., 10., 30., 30.]])
         wm = DeepAIFAgent._bbox_weight_map(
             bbox, (1, 3, 64, 64), 5.0, torch.device("cpu"),
         )
         assert wm.shape == (1, 1, 64, 64)
         assert wm[0, 0, 0, 0].item() == 1.0          # corner outside bbox
-        assert wm[0, 0, 20, 20].item() == 5.0        # inside bbox
+        assert wm[0, 0, 20, 20].item() == 1.0        # left of mirrored box → outside
+        assert wm[0, 0, 20, 44].item() == 5.0        # (row20,col44) inside mirrored box
 
     def test_nan_bbox_gives_uniform(self):
         bbox = torch.tensor([[float("nan")] * 4])
