@@ -467,6 +467,11 @@ def main():
         help="Print per-step loss every N batches (0=off). Small values (10-20) "
              "help pinpoint which step a divergence happens on.",
     )
+    parser.add_argument(
+        "--step_log", action="store_true", default=False,
+        help="Enable per-step loss logging (tqdm postfix + periodic print). "
+             "Off by default; turn on like --diag_grid to watch for divergence.",
+    )
 
     args = parser.parse_args()
 
@@ -653,15 +658,16 @@ def main():
             writer.add_scalar("train/lr", cur_lr, global_step)
 
             # Real-time per-step view on the progress bar (catch divergence live).
-            pbar.set_postfix({
-                "loss": f"{info['total_loss']:.3f}",
-                "kl_dyn": f"{info.get('kl_dyn', 0.0):.2f}",
-                "rr": f"{info.get('rollout_recon', 0.0):.4f}",
-                "cyc": f"{info.get('cycle', 0.0):.2f}",
-            })
+            if args.step_log:
+                pbar.set_postfix({
+                    "loss": f"{info['total_loss']:.3f}",
+                    "kl_dyn": f"{info.get('kl_dyn', 0.0):.2f}",
+                    "rr": f"{info.get('rollout_recon', 0.0):.4f}",
+                    "cyc": f"{info.get('cycle', 0.0):.2f}",
+                })
 
             # Persisted per-step log line (survives in nohup logs).
-            if args.log_interval > 0 and (batch_idx + 1) % args.log_interval == 0:
+            if args.step_log and args.log_interval > 0 and (batch_idx + 1) % args.log_interval == 0:
                 print(
                     f"  [e{epoch + 1} s{batch_idx + 1}/{len(dataloader)}] "
                     f"loss={info['total_loss']:.3f} "
