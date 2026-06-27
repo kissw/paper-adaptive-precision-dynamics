@@ -462,6 +462,11 @@ def main():
         "--ae_kl_rep", type=float, default=0.01,
         help="Stage-ae weak posterior KL toward N(0,1); 0 = pure AE.",
     )
+    parser.add_argument(
+        "--log_interval", type=int, default=50,
+        help="Print per-step loss every N batches (0=off). Small values (10-20) "
+             "help pinpoint which step a divergence happens on.",
+    )
 
     args = parser.parse_args()
 
@@ -609,9 +614,10 @@ def main():
         epoch_sel_losses = []
         completed_epoch = epoch + 1
 
-        for batch_idx, batch in enumerate(
-            tqdm(dataloader, desc=f"Epoch {epoch + 1}/{cfg.training.epochs}", leave=False)
-        ):
+        pbar = tqdm(
+            dataloader, desc=f"Epoch {epoch + 1}/{cfg.training.epochs}", leave=False,
+        )
+        for batch_idx, batch in enumerate(pbar):
             # Dataset returns 3/4/5 tensors (images, states, actions[, labels, bbox])
             images, states, actions, obs_labels, obstacle_bbox = _unpack_batch(batch)
             try:
@@ -643,9 +649,28 @@ def main():
 
             for k, v in info.items():
                 writer.add_scalar(f"train/{k}", v, global_step)
-            writer.add_scalar(
-                "train/lr", agent._optimizer.param_groups[0]["lr"], global_step,
-            )
+            cur_lr = agent._optimizer.param_groups[0]["lr"]
+            writer.add_scalar("train/lr", cur_lr, global_step)
+
+            # Real-time per-step view on the progress bar (catch divergence live).
+            pbar.set_postfix({
+                "loss": f"{info['total_loss']:.3f}",
+                "kl_dyn": f"{info.get('kl_dyn', 0.0):.2f}",
+                "rr": f"{info.get('rollout_recon', 0.0):.4f}",
+                "cyc": f"{info.get('cycle', 0.0):.2f}",
+            })
+
+            # Persisted per-step log line (survives in nohup logs).
+            if args.log_interval > 0 and (batch_idx + 1) % args.log_interval == 0:
+                print(
+                    f"  [e{epoch + 1} s{batch_idx + 1}/{len(dataloader)}] "
+                    f"loss={info['total_loss']:.3f} "
+                    f"kl_dyn={info.get('kl_dyn', 0.0):.2f} "
+                    f"rr={info.get('rollout_recon', 0.0):.4f} "
+                    f"cyc={info.get('cycle', 0.0):.3f} "
+                    f"lr={cur_lr:.2e}",
+                    flush=True,
+                )
 
         mean_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
         mean_sel_loss = (
