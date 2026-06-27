@@ -667,6 +667,7 @@ def main():
                     f"loss={info['total_loss']:.3f} "
                     f"kl_dyn={info.get('kl_dyn', 0.0):.2f} "
                     f"rr={info.get('rollout_recon', 0.0):.4f} "
+                    f"rr_w={info.get('eff_rr_weight', 0.0):.3f} "
                     f"cyc={info.get('cycle', 0.0):.3f} "
                     f"lr={cur_lr:.2e}",
                     flush=True,

@@ -44,6 +44,7 @@ class TrainingConfig:
     warp_smoothness_weight: float = 0.0       # A1 flow TV regularization weight
     rollout_recon_horizon: int = 0            # multi-step pixel rollout recon; 0=off
     rollout_recon_weight: float = 0.0         # weight for rollout recon loss
+    rollout_recon_warmup_steps: int = 0       # linear rollout_recon warmup; 0=off
     rollout_recon_obstacle_weight: float = 1.0  # obstacle bbox pixel upweight (1=uniform)
     rollout_recon_step_decay: float = 0.0     # per-step weight decay; 0=uniform
     img_recon_obstacle_weight: float = 1.0    # 1-step img recon obstacle upweight (1=uniform)

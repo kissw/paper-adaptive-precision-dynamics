@@ -479,6 +479,14 @@ class DeepAIFAgent:
         else:
             ramp = 1.0
         eff_cycle_weight = cycle_weight * ramp
+        # Same warmup for rollout_recon: a fresh rssm's 5-step rollout can blow
+        # up before kl_dyn stabilises, so ramp the recon weight in gradually.
+        rr_warmup_steps = getattr(cfg, "rollout_recon_warmup_steps", 0)
+        if rr_warmup_steps > 0:
+            rr_ramp = min(1.0, self._train_step / rr_warmup_steps)
+        else:
+            rr_ramp = 1.0
+        eff_rr_weight = rollout_recon_weight * rr_ramp
         rr_horizon_eff = max(rollout_recon_horizon, overshoot_horizon, cycle_horizon)
         # ViT token-grid params for obstacle-token weighting in the cycle loss.
         _tv = getattr(self._cfg, "token_vit", None)
@@ -637,14 +645,16 @@ class DeepAIFAgent:
                                     )  # (B,1,H,W)
                                     mse_rr = mse_rr * w_map
                                 step_w = (1.0 - rollout_recon_decay) ** (h - 1)
-                                rr_loss = rr_loss + step_w * mse_rr.mean()
+                                # Clamp per-step recon so an Inf/huge mse from a
+                                # diverging rollout latent does not propagate.
+                                rr_loss = rr_loss + step_w * mse_rr.mean().clamp(max=100.0)
 
                         if do_rr:
                             n_rr_used = min(rollout_recon_horizon, T - 1 - t)
                             if n_rr_used > 0:
                                 rr_loss = rr_loss / n_rr_used
-                                loss    = loss + rollout_recon_weight * rr_loss
-                                rr_val  = rr_loss.item()
+                                loss    = loss + eff_rr_weight * rr_loss
+                                rr_val  = rr_loss.item()  # raw (pre-weight) for monitoring
                         if do_cycle and n_cyc > 0:
                             cycle_loss = cycle_loss / n_cyc
                             loss = loss + eff_cycle_weight * cycle_loss
@@ -730,9 +740,15 @@ class DeepAIFAgent:
         if sched is not None:
             sched.step()
 
-        self._train_step += 1  # advance cycle_weight warmup counter
+        self._train_step += 1  # advance warmup counters
 
-        return {k: v / T for k, v in accum.items()} | {"total_loss": total_loss_value}
+        # Expose warmup ramps so the trainer can log whether warmup is active.
+        return (
+            {k: v / T for k, v in accum.items()}
+            | {"total_loss": total_loss_value,
+               "rr_ramp": rr_ramp, "cycle_ramp": ramp,
+               "eff_rr_weight": eff_rr_weight}
+        )
 
     @staticmethod
     def _det_state(post):

@@ -41,6 +41,49 @@ class TestRolloutReconLoss:
         assert info["rollout_recon"] > 0.0
         assert not torch.isnan(torch.tensor(info["total_loss"]))
 
+    def test_warmup_ramps_in(self):
+        """rollout_recon_warmup_steps=N: ramp 0→1 over N steps; step 0 inert."""
+        agent, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.free_nats=1.0",  # clamp kl_dyn → no grad, isolate rr
+            "training.rollout_recon_horizon=3", "training.rollout_recon_weight=0.5",
+            "training.rollout_recon_warmup_steps=4",
+        ])
+        ramps = []
+        w0 = torch.cat([p.flatten() for p in agent.world_model.rssm.parameters()]).clone()
+        moved = []
+        for _ in range(5):
+            info = agent.update(*_batch(cfg))
+            ramps.append(round(info["rr_ramp"], 3))
+            cur = torch.cat([p.flatten() for p in agent.world_model.rssm.parameters()])
+            moved.append(not torch.allclose(w0, cur))
+            w0 = cur.clone()
+        assert ramps == [0.0, 0.25, 0.5, 0.75, 1.0]
+        assert moved[0] is False and moved[1] is True
+
+    def test_warmup_off_full_weight(self):
+        agent, cfg = _agent([
+            "training.rollout_recon_horizon=3", "training.rollout_recon_weight=0.5",
+            "training.rollout_recon_warmup_steps=0",
+        ])
+        info = agent.update(*_batch(cfg))
+        assert info["rr_ramp"] == 1.0
+
+    def test_clamp_keeps_finite_on_extreme_input(self):
+        """Per-step clamp(max=100) bounds rollout_recon under huge recon error."""
+        import math
+        agent, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.free_nats=0.0",
+            "training.rollout_recon_horizon=3", "training.rollout_recon_weight=0.5",
+        ])
+        T = cfg.training.seq_len
+        imgs = (torch.rand(2, T, 3, 64, 64) - 0.5) * 1e3  # inflate mse
+        info = agent.update(imgs, torch.zeros(2, T, 4), torch.zeros(2, T, 2))
+        assert info["rollout_recon"] <= 100.0 + 1e-3
+        assert not math.isinf(info["total_loss"])
+        assert info["total_loss"] == info["total_loss"]  # not NaN
+
     def test_increases_total_loss(self):
         """With same seed, enabling rollout recon changes total loss."""
         a_off, cfg = _agent()
