@@ -110,6 +110,8 @@ training:
   cycle_horizon: 5          # rollout steps cycle loss spans (indep. of overshoot)
   cycle_warmup_steps: 5000  # linear cycle_weight warmup; 0=off
   obstacle_token_weight: 1.0  # ViT: upweight obstacle-overlap tokens in cycle loss (1=off)
+  rollout_single_shot: false  # PAActInf-style: rollout rr/cycle once per sequence
+  rollout_context_frames: 25  # P: single-shot rollout start frame
 
 evaluation:
   episodes: 5

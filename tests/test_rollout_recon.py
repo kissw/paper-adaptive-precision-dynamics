@@ -41,6 +41,45 @@ class TestRolloutReconLoss:
         assert info["rollout_recon"] > 0.0
         assert not torch.isnan(torch.tensor(info["total_loss"]))
 
+    def test_single_shot_rolls_out_once(self):
+        """single_shot rolls out rr/cycle once per sequence, not every timestep."""
+        def _count(ss):
+            agent, cfg = _agent([
+                "training.stage=transition", "training.kl_rep_scale=0.0",
+                "training.free_nats=0.0", "training.seq_len=12",
+                "training.rollout_recon_horizon=3", "training.rollout_recon_weight=0.5",
+                f"training.rollout_single_shot={ss}",
+                "training.rollout_context_frames=6",
+            ])
+            n = {"c": 0}
+            orig = agent.world_model.rssm.img_step
+            agent.world_model.rssm.img_step = (
+                lambda s, a, _o=orig, _n=n: (_n.__setitem__("c", _n["c"] + 1), _o(s, a))[1]
+            )
+            agent.update(*_batch(cfg))
+            return n["c"]
+        per_ts = _count(False)
+        single = _count(True)
+        # per-timestep does ~T extra rollouts; single-shot does just H once
+        assert single < per_ts
+        assert single <= 12 + 3 + 2  # obs_step(T) + one rollout(H) + slack
+
+    def test_single_shot_finite_and_trains(self):
+        agent, cfg = _agent([
+            "training.stage=transition", "training.kl_rep_scale=0.0",
+            "training.free_nats=0.0", "training.seq_len=12",
+            "training.rollout_recon_horizon=3", "training.rollout_recon_weight=0.5",
+            "training.rollout_single_shot=True", "training.rollout_context_frames=6",
+        ])
+        rssm0 = next(agent.world_model.rssm.parameters()).detach().clone()
+        info = agent.update(*_batch(cfg))
+        assert not torch.isnan(torch.tensor(info["total_loss"]))
+        assert not torch.allclose(rssm0, next(agent.world_model.rssm.parameters()))
+
+    def test_single_shot_default_off(self):
+        agent, cfg = _agent()
+        assert cfg.training.rollout_single_shot is False
+
     def test_warmup_ramps_in(self):
         """rollout_recon_warmup_steps=N: ramp 0→1 over N steps; step 0 inert."""
         agent, cfg = _agent([

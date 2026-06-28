@@ -54,6 +54,8 @@ class TrainingConfig:
     cycle_horizon: int = 5      # rollout steps the cycle loss spans (indep. of overshoot)
     cycle_warmup_steps: int = 5000  # linear cycle_weight warmup; 0=no warmup
     obstacle_token_weight: float = 1.0  # ViT: upweight obstacle-overlap tokens in cycle loss (1=off)
+    rollout_single_shot: bool = False   # rollout rr/cycle once per sequence (PAActInf style) instead of every timestep
+    rollout_context_frames: int = 25    # P: single-shot rollout start frame (z0 = posterior at P-1)
     stage: str = "joint"        # "joint" | "ae" | "transition" — two-stage training
     ae_kl_rep: float = 0.01     # stage-ae weak posterior KL toward N(0,1); 0=pure AE
 

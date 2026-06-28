@@ -492,6 +492,13 @@ class DeepAIFAgent:
             rr_ramp = 1.0
         eff_rr_weight = rollout_recon_weight * rr_ramp
         rr_horizon_eff = max(rollout_recon_horizon, overshoot_horizon, cycle_horizon)
+        # Single-shot rollout: roll out rr/cycle ONCE per sequence (from the
+        # posterior at frame P-1) instead of every timestep — avoids the
+        # gradient accumulation across ~T rollouts that destabilizes a fresh
+        # rssm.  H spans max(rollout_recon_horizon, cycle_horizon).
+        rollout_single_shot = bool(getattr(cfg, "rollout_single_shot", False))
+        rollout_P = int(getattr(cfg, "rollout_context_frames", 25))
+        ss_H = max(rollout_recon_horizon, cycle_horizon)
         # ViT token-grid params for obstacle-token weighting in the cycle loss.
         _tv = getattr(self._cfg, "token_vit", None)
         _is_vit = wm._wm_type == "token_vit"
@@ -601,7 +608,62 @@ class DeepAIFAgent:
                 cycle_val = 0.0
                 do_rr = rollout_recon_horizon > 0 and rollout_recon_weight > 0.0
                 do_cycle = cycle_weight > 0.0 and bool(posteriors_ref)
-                if (do_rr or do_cycle) and t + 1 < T:
+
+                # ── Single-shot rollout (PAActInf style): once per sequence ──
+                # Runs only at t == P-1, from the grad-connected posterior `post`,
+                # and adds its loss to THIS timestep's loss so the per-timestep
+                # backward below covers it in a single graph.
+                if rollout_single_shot and (do_rr or do_cycle) and t == rollout_P - 1 and t + 1 < T:
+                    state_ss = post
+                    rr_loss    = torch.zeros((), device=self._device)
+                    cycle_loss = torch.zeros((), device=self._device)
+                    n_cyc = 0
+                    n_rr_ss = 0
+                    for h in range(1, ss_H + 1):
+                        idx = (rollout_P - 1) + h
+                        if idx >= T:
+                            break
+                        state_ss = wm.rssm.img_step(state_ss, actions[:, idx].to(self._device))
+                        if do_cycle and h <= cycle_horizon and idx < len(posteriors_ref):
+                            pm, _ = wm.get_kl_stats(state_ss)
+                            qm, _ = wm.get_kl_stats(posteriors_ref[idx])
+                            sq = (pm - qm.detach()).pow(2)
+                            if use_token_weight and pm.ndim == 3:
+                                tok_mask = self._bbox_token_mask(
+                                    obstacle_bbox[:, idx], pm.shape[1],
+                                    _tv.image_size, _tv.patch_size, self._device,
+                                    crop_road=_crop, keep_bottom_frac=_keep_frac,
+                                )
+                                w_tok = 1.0 + (obstacle_token_weight - 1.0) * tok_mask
+                                sq = sq * w_tok.unsqueeze(-1)
+                            # Single rollout/seq → no per-step explosion; keep a
+                            # loose clamp only as an Inf guard.
+                            cycle_loss = cycle_loss + sq.mean().clamp(max=1e4)
+                            n_cyc += 1
+                        if do_rr and h <= rollout_recon_horizon:
+                            recon_ss  = wm.decode_obs(state_ss)
+                            target_ss = wm.preprocess_image(images[:, idx].to(self._device))
+                            mse_ss = (recon_ss - target_ss).pow(2)
+                            if rollout_recon_obs_w > 1.0 and obstacle_bbox is not None:
+                                w_map = self._bbox_weight_map(
+                                    obstacle_bbox[:, idx], recon_ss.shape,
+                                    rollout_recon_obs_w, self._device,
+                                )
+                                mse_ss = mse_ss * w_map
+                            step_w = (1.0 - rollout_recon_decay) ** (h - 1)
+                            rr_loss = rr_loss + step_w * mse_ss.mean().clamp(max=1e4)
+                            n_rr_ss += 1
+                    if do_rr and n_rr_ss > 0:
+                        rr_loss = rr_loss / n_rr_ss
+                        loss = loss + eff_rr_weight * rr_loss
+                        rr_val = rr_loss.item()
+                    if do_cycle and n_cyc > 0:
+                        cycle_loss = cycle_loss / n_cyc
+                        loss = loss + eff_cycle_weight * cycle_loss
+                        cycle_val = cycle_loss.item()
+
+                # ── Per-timestep rollout (default, every t) ──────────────────
+                if (not rollout_single_shot) and (do_rr or do_cycle) and t + 1 < T:
                     n_rr = min(rr_horizon_eff, T - 1 - t)
                     if n_rr > 0:
                         state_rr = post
