@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import torch
@@ -195,8 +196,11 @@ class DeepAIFAgent:
         # to Inf→NaN.  bf16 has the fp32 exponent range, so no overflow and no
         # GradScaler is needed.  If bf16 is unsupported, fall back to fp32 — fp16
         # is intentionally never used.
+        # FORCE_FP32=1 disables bf16 autocast (full fp32) — to test whether bf16
+        # is the source of any transition-stage divergence.
+        force_fp32 = os.environ.get("FORCE_FP32") == "1"
         cuda_ok = "cuda" in str(self._device)
-        if cuda_ok and torch.cuda.is_bf16_supported():
+        if cuda_ok and torch.cuda.is_bf16_supported() and not force_fp32:
             self._use_amp = True
             self._amp_dtype = torch.bfloat16
         else:
