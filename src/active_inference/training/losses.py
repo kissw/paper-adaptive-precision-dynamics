@@ -109,3 +109,18 @@ def compute_overshoot_kl(
         Normal(prior_mean, prior_std),
     ).sum(-1).mean()
     return torch.clamp(kl, min=free_nats)
+
+
+def compute_transition_target_kl(
+    prior_mean: Tensor,
+    prior_std: Tensor,
+    target_mean: Tensor,
+    target_std: Tensor,
+    free_nats: float = 1.0,
+) -> tuple[Tensor, Tensor]:
+    """Return raw and free-nats-clamped KL(target posterior || online prior)."""
+    kl_raw = kl_divergence(
+        Normal(target_mean.detach(), target_std.detach()),
+        Normal(prior_mean, prior_std),
+    ).sum(-1).mean()
+    return kl_raw, torch.clamp(kl_raw, min=free_nats)

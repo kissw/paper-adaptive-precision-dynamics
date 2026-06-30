@@ -56,6 +56,14 @@ class TrainingConfig:
     obstacle_token_weight: float = 1.0  # ViT: upweight obstacle-overlap tokens in cycle loss (1=off)
     rollout_single_shot: bool = False   # rollout rr/cycle once per sequence (PAActInf style) instead of every timestep
     rollout_context_frames: int = 25    # P: single-shot rollout start frame (z0 = posterior at P-1)
+    transition_loss_mode: str = "vfe"    # "vfe" | "target_rollout"
+    transition_use_target_model: bool = False
+    lambda_kl: float = 1.0
+    lambda_pix: float = 0.0
+    rollout_horizon: int = 1
+    rollout_decode_horizons: list[int] = field(default_factory=lambda: [1])
+    rollout_pix_warmup_steps: int = 0
+    free_nats_transition: float | None = None
     stage: str = "joint"        # "joint" | "ae" | "transition" — two-stage training
     ae_kl_rep: float = 0.01     # stage-ae weak posterior KL toward N(0,1); 0=pure AE
 

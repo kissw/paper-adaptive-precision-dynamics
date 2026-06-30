@@ -114,11 +114,11 @@ def build_checkpoint(
     epoch: int,
     global_step: int | None,
     train_loss: float | None,
-    val_loss: float | None,
-    best_epoch: int | None,
-    best_loss: float | None,
-    checkpoint_type: str,
-    is_best: bool,
+    val_loss: float | None = None,
+    best_epoch: int | None = None,
+    best_loss: float | None = None,
+    checkpoint_type: str = "epoch",
+    is_best: bool = False,
     val_metrics: dict[str, float] | None = None,
     selection_loss: float | None = None,
     stage: str | None = None,
@@ -186,7 +186,8 @@ def stage_selection_loss(stage: str, info: dict[str, float]) -> float:
         img_loss + state_loss
 
     transition:
-        kl_dyn + rollout_recon + cycle
+        target_rollout mode: kl_raw + rollout_pix_mse
+        otherwise: kl_dyn + rollout_recon + cycle
 
         cycle is included because cycle-only transition fine-tuning otherwise
         cannot affect best.pt selection. When cycle is disabled or not computed,
@@ -199,6 +200,11 @@ def stage_selection_loss(stage: str, info: dict[str, float]) -> float:
         return float(info.get("img_loss", 0.0) + info.get("state_loss", 0.0))
 
     if stage == "transition":
+        if "kl_raw" in info or "rollout_pix_mse" in info:
+            return float(
+                info.get("kl_raw", 0.0)
+                + info.get("rollout_pix_mse", 0.0)
+            )
         return float(
             info.get("kl_dyn", 0.0)
             + info.get("rollout_recon", 0.0)
@@ -268,9 +274,47 @@ def evaluate_world_model(
     if stage == "ae":
         return _evaluate_ae(agent, dataloader)
 
+    cfg = agent._cfg.training
+    if (
+        stage == "transition"
+        and getattr(cfg, "transition_loss_mode", "") == "target_rollout"
+        and agent.target_world_model is not None
+    ):
+        wm = agent.world_model
+        was_training = wm.training
+        wm.eval()
+        totals = {
+            "total_loss": 0.0,
+            "img_loss": 0.0,
+            "state_loss": 0.0,
+            "kl_dyn": 0.0,
+            "kl_rep": 0.0,
+            "obs_aux_loss": 0.0,
+            "rollout_recon": 0.0,
+            "cycle": 0.0,
+            "kl_raw": 0.0,
+            "kl_clamped": 0.0,
+            "rollout_pix_mse": 0.0,
+            "overshoot_kl": 0.0,
+            "lambda_pix_eff": 0.0,
+        }
+        n_batches = 0
+        for batch in tqdm(dataloader, desc="Validation(target_rollout)", leave=False):
+            images, states, actions, _, _ = _unpack_batch(batch)
+            info = agent.evaluate_transition_target_rollout_batch(
+                images, states, actions,
+            )
+            n_batches += 1
+            for k in totals:
+                totals[k] += float(info.get(k, 0.0))
+        if was_training:
+            wm.train()
+        if n_batches == 0:
+            return {k: float("nan") for k in totals}
+        return {k: v / n_batches for k, v in totals.items()}
+
     wm = agent.world_model
     device = agent._device
-    cfg = agent._cfg.training
     beta_obstacle_aux = getattr(cfg, "beta_obstacle_aux", 0.0)
 
     rr_horizon = getattr(cfg, "rollout_recon_horizon", 0)
@@ -671,19 +715,24 @@ def main():
     agent = DeepAIFAgent(cfg)
     print(f"Training stage: {args.stage}")
 
-    # Stage-2 (transition): initialise encoder-decoder from a stage-1 ckpt.
-    if args.stage == "transition":
-        if args.init_from is None:
-            print("WARNING: --stage transition without --init_from; "
-                  "encoder-decoder will use random init (not recommended).")
-        else:
-            agent.load_encoder_decoder(args.init_from)
-            agent.freeze_encoder_decoder()  # re-assert eval()/requires_grad after load
-
     start_epoch = args.start_epoch
     if args.resume:
         print(f"Resuming from {args.resume}")
         agent.load_checkpoint(args.resume)
+        if args.stage == "transition":
+            agent.freeze_encoder_decoder()
+            if (
+                getattr(cfg.training, "transition_loss_mode", "") == "target_rollout"
+                and getattr(cfg.training, "transition_use_target_model", False)
+            ):
+                if args.init_from is None:
+                    print(
+                        "WARNING: target_rollout resume without --init_from; "
+                        "using the resume checkpoint as target_world_model."
+                    )
+                    agent.set_target_world_model_from_checkpoint(args.resume)
+                else:
+                    agent.set_target_world_model_from_checkpoint(args.init_from)
         if start_epoch == 0:
             import re
 
@@ -692,7 +741,22 @@ def main():
                 start_epoch = int(m.group(1))
                 print(f"Auto-detected start epoch: {start_epoch}")
 
-    # LR schedule: warmup � cosine decay over the full run (after any resume,
+    # Stage-2 (transition): warm-start the full world model from stage-1 AE.
+    if args.stage == "transition" and not args.resume:
+        if args.init_from is None:
+            print("WARNING: --stage transition without --init_from; "
+                  "world_model will use random init (not recommended).")
+        else:
+            agent.load_world_model_weights(args.init_from)
+            print("Loaded full world_model from AE checkpoint for transition warm-start")
+            agent.freeze_encoder_decoder()  # re-assert eval()/requires_grad after load
+            if (
+                getattr(cfg.training, "transition_loss_mode", "") == "target_rollout"
+                and getattr(cfg.training, "transition_use_target_model", False)
+            ):
+                agent.set_target_world_model_from_checkpoint(args.init_from)
+
+    # LR schedule: warmup -> cosine decay over the full run (after any resume,
     # so the scheduler binds to the final optimizer instance).
     total_train_steps = cfg.training.epochs * len(dataloader)
     # Resume the cycle_weight warmup counter so it doesn't restart from 0.
@@ -799,6 +863,8 @@ def main():
                 pbar.set_postfix({
                     "loss": f"{info['total_loss']:.3f}",
                     "kl_dyn": f"{info.get('kl_dyn', 0.0):.2f}",
+                    "kl_raw": f"{info.get('kl_raw', 0.0):.2f}",
+                    "pix": f"{info.get('rollout_pix_mse', 0.0):.4f}",
                     "rr": f"{info.get('rollout_recon', 0.0):.4f}",
                     "cyc": f"{info.get('cycle', 0.0):.2f}",
                 })
@@ -809,6 +875,9 @@ def main():
                     f"  [e{epoch + 1} s{batch_idx + 1}/{len(dataloader)}] "
                     f"loss={info['total_loss']:.3f} "
                     f"kl_dyn={info.get('kl_dyn', 0.0):.2f} "
+                    f"kl_raw={info.get('kl_raw', 0.0):.2f} "
+                    f"kl_clamped={info.get('kl_clamped', 0.0):.2f} "
+                    f"pix={info.get('rollout_pix_mse', 0.0):.4f} "
                     f"rr={info.get('rollout_recon', 0.0):.4f} "
                     f"rr_w={info.get('eff_rr_weight', 0.0):.3f} "
                     f"cyc={info.get('cycle', 0.0):.3f} "
@@ -839,16 +908,19 @@ def main():
                 f"img={val_info['img_loss']:.4f} "
                 f"state={val_info['state_loss']:.4f} "
                 f"kl_dyn={val_info['kl_dyn']:.4f} "
+                f"kl_raw={val_info.get('kl_raw', 0.0):.4f} "
+                f"kl_clamped={val_info.get('kl_clamped', 0.0):.4f} "
                 f"kl_rep={val_info['kl_rep']:.4f} "
+                f"pix={val_info.get('rollout_pix_mse', 0.0):.4f} "
                 f"rollout_recon={val_info['rollout_recon']:.4f} "
                 f"cycle={val_info.get('cycle', 0.0):.4f} "
                 f"| sel[{args.stage}]={val_sel_loss:.4f}"
             )
 
         # Stage-aware best.pt selection:
-        #   ae         � img+state recon
-        #   transition � kl_dyn + rollout_recon + cycle
-        #   joint      � full VFE total_loss
+        #   ae         -> img+state recon
+        #   transition -> kl_dyn + rollout_recon + cycle
+        #   joint      -> full VFE total_loss
         # Falls back to the train-side stage selection when no valid split.
         if valid_loader is not None:
             selection_loss = val_sel_loss
@@ -900,7 +972,7 @@ def main():
                               if last_val_loss is not None else f"epoch {best_epoch}",
                     )
                     if ok:
-                        print(f"  Diagnostic grid � "
+                        print(f"  Diagnostic grid -> "
                               f"{diag_dir / f'diag_epoch{best_epoch}_best.png'}")
                 except Exception as e:
                     print(f"  WARNING: diag grid failed: {e}")
@@ -913,6 +985,27 @@ def main():
                 )
             else:
                 print(f"  No valid best loss yet. No-improvement count={epochs_without_improvement}")
+
+        # Diagnostic rollout grid every epoch so transition drift is visible even
+        # when clamped losses hide raw rollout quality.
+        if diag_window is not None:
+            d_imgs, d_states, d_actions, d_start = diag_window
+            try:
+                ok = make_diag_grid(
+                    agent.world_model,
+                    d_imgs, d_states, d_actions,
+                    start_idx=d_start,
+                    output_path=str(diag_dir / f"diag_epoch{epoch + 1}.png"),
+                    horizons=diag_horizons,
+                    context_len=min(5, cfg.training.seq_len),
+                    device=agent._device,
+                    title=f"epoch {epoch + 1}  val={last_val_loss}"
+                          if last_val_loss is not None else f"epoch {epoch + 1}",
+                )
+                if ok:
+                    print(f"  Diagnostic grid -> {diag_dir / f'diag_epoch{epoch + 1}.png'}")
+            except Exception as e:
+                print(f"  WARNING: diag grid failed: {e}")
 
         early_stop_triggered = (
             args.early_stop_patience > 0

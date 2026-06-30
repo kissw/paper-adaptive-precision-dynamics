@@ -14,7 +14,11 @@ from active_inference.models.rssm import RSSM, RSSMState
 from active_inference.models.ensemble import EnsembleTransitionHeads
 from active_inference.planning.cem_planner import iCEMPlanner, PlanResult
 from active_inference.planning.efe import EFEScorer
-from active_inference.training.losses import compute_overshoot_kl, compute_vfe
+from active_inference.training.losses import (
+    compute_overshoot_kl,
+    compute_transition_target_kl,
+    compute_vfe,
+)
 from active_inference.training.preference import PreferenceModel
 from active_inference.utils.transforms import crop_road as _crop_road
 
@@ -140,6 +144,7 @@ class DeepAIFAgent:
         self._device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
 
         self.world_model = WorldModel(cfg).to(self._device)
+        self.target_world_model: WorldModel | None = None
         self.preference = PreferenceModel(
             K=cfg.preference.K,
             latent_dim=cfg.rssm.stoch_dim,
@@ -452,12 +457,19 @@ class DeepAIFAgent:
         obstacle_labels: Tensor | None = None,
         obstacle_bbox: Tensor | None = None,
     ) -> dict[str, float]:
+        cfg = self._cfg.training
+        if (
+            self._stage == "transition"
+            and getattr(cfg, "transition_loss_mode", "") == "target_rollout"
+            and self.target_world_model is not None
+        ):
+            return self.update_transition_target_rollout(images, states, actions)
+
         # Per-timestep backward with NaN guard, AMP, and CUDA error recovery
         # obstacle_labels: [B, T] binary (1=obstacle visible, 0=clear)
         # obstacle_bbox:   [B, T, 4] pixel xyxy bbox; None = no bbox weighting
         B, T = images.shape[0], images.shape[1]
         wm = self.world_model
-        cfg = self._cfg.training
         beta_obstacle_aux = getattr(cfg, "beta_obstacle_aux", 0.0)
 
         overshoot_horizon = getattr(cfg, "overshoot_horizon", 0)
@@ -826,6 +838,194 @@ class DeepAIFAgent:
                "eff_cycle_weight": eff_cycle_weight}
         )
 
+    def _target_rollout_forward(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Transition-stage target posterior rollout objective."""
+        if self.target_world_model is None:
+            raise RuntimeError(
+                "transition_loss_mode='target_rollout' requires "
+                "target_world_model. Pass --init_from with an AE checkpoint."
+            )
+
+        wm = self.world_model
+        target_wm = self.target_world_model
+        cfg = self._cfg.training
+        B, T = images.shape[:2]
+
+        context = int(getattr(cfg, "rollout_context_frames", 25)) - 1
+        horizon = int(getattr(cfg, "rollout_horizon", 1))
+        context = max(0, context)
+        horizon = max(1, horizon)
+        if context >= T - 1:
+            zero = torch.zeros((), device=self._device)
+            return zero, {
+                "kl_raw": zero,
+                "kl_clamped": zero,
+                "kl_dyn": zero,
+                "rollout_pix_mse": zero,
+                "rollout_recon": zero,
+                "img_loss": zero,
+                "state_loss": zero,
+                "kl_rep": zero,
+                "obs_aux_loss": zero,
+                "cycle": zero,
+                "overshoot_kl": zero,
+                "lambda_pix_eff": zero,
+            }
+        horizon_eff = min(horizon, T - 1 - context)
+
+        target_posts = []
+        prev_t = target_wm.rssm.initial(B, self._device)
+        with torch.no_grad():
+            with torch.amp.autocast(
+                "cuda", enabled=self._use_amp, dtype=self._amp_dtype,
+            ):
+                for t in range(T):
+                    img_t = target_wm.preprocess_image(images[:, t].to(self._device))
+                    st_t = states[:, t].to(self._device)
+                    act_t = actions[:, t].to(self._device)
+                    embed = target_wm.encoder(img_t, st_t)
+                    post_t, _ = target_wm.rssm.obs_step(prev_t, act_t, embed)
+                    post_t = type(post_t)(*[x.detach() for x in post_t])
+                    target_posts.append(post_t)
+                    prev_t = post_t
+
+        free_nats_cfg = getattr(cfg, "free_nats_transition", None)
+        if free_nats_cfg is None:
+            free_nats_cfg = getattr(cfg, "free_nats", 1.0)
+        free_nats = float(free_nats_cfg)
+        decode_horizons = [
+            int(h) for h in getattr(cfg, "rollout_decode_horizons", [horizon_eff])
+        ]
+        decode_horizons = [
+            h for h in decode_horizons if 1 <= h <= horizon_eff
+        ] or [horizon_eff]
+
+        kl_raw_sum = torch.zeros((), device=self._device)
+        kl_clamped_sum = torch.zeros((), device=self._device)
+        pix_sum = torch.zeros((), device=self._device)
+        n_pix = 0
+
+        state_roll = type(target_posts[context])(
+            *[x.detach() for x in target_posts[context]]
+        )
+        with torch.amp.autocast(
+            "cuda", enabled=self._use_amp, dtype=self._amp_dtype,
+        ):
+            for h in range(1, horizon_eff + 1):
+                idx = context + h
+                act_h = actions[:, idx].to(self._device)
+                state_roll = wm.rssm.img_step(state_roll, act_h)
+
+                prior_mean, prior_std = wm.get_kl_stats(state_roll)
+                target_mean, target_std = target_wm.get_kl_stats(target_posts[idx])
+                kl_raw, kl_clamped = compute_transition_target_kl(
+                    prior_mean,
+                    prior_std,
+                    target_mean,
+                    target_std,
+                    free_nats=free_nats,
+                )
+                kl_raw_sum = kl_raw_sum + kl_raw
+                kl_clamped_sum = kl_clamped_sum + kl_clamped
+
+                if h in decode_horizons:
+                    # Decoder parameters are frozen, but this forward must keep
+                    # gradients to the rollout latent/RSSM prior.
+                    recon_h = wm.decode_obs(state_roll)
+                    target_img = wm.preprocess_image(images[:, idx].to(self._device))
+                    pix_sum = pix_sum + (recon_h - target_img).pow(2).mean()
+                    n_pix += 1
+
+            kl_raw_mean = kl_raw_sum / horizon_eff
+            kl_clamped_mean = kl_clamped_sum / horizon_eff
+            rollout_pix_mse = pix_sum / max(1, n_pix)
+
+            lambda_kl = float(getattr(cfg, "lambda_kl", 1.0))
+            lambda_pix = float(getattr(cfg, "lambda_pix", 0.0))
+            pix_warmup = int(getattr(cfg, "rollout_pix_warmup_steps", 0))
+            if pix_warmup > 0:
+                pix_ramp = min(1.0, self._train_step / pix_warmup)
+            else:
+                pix_ramp = 1.0
+            lambda_pix_eff = lambda_pix * pix_ramp
+            loss = lambda_kl * kl_clamped_mean + lambda_pix_eff * rollout_pix_mse
+
+        with torch.no_grad():
+            ctx = context
+            img_ctx = wm.preprocess_image(images[:, ctx].to(self._device))
+            st_ctx = states[:, ctx].to(self._device)
+            det_ctx = self._det_state(target_posts[ctx])
+            recon_ctx = wm.decode_obs(det_ctx)
+            feat_ctx = wm.rssm.get_feat(det_ctx)
+            recon_state_ctx = wm.state_decoder(feat_ctx)
+            img_loss = (recon_ctx - img_ctx).pow(2).mean()
+            from active_inference.utils.transforms import symlog
+            state_loss = nn.functional.mse_loss(
+                symlog(recon_state_ctx), symlog(st_ctx),
+            )
+
+        zero = torch.zeros((), device=self._device)
+        return loss, {
+            "kl_raw": kl_raw_mean,
+            "kl_clamped": kl_clamped_mean,
+            "kl_dyn": kl_clamped_mean,
+            "rollout_pix_mse": rollout_pix_mse,
+            "rollout_recon": rollout_pix_mse,
+            "img_loss": img_loss,
+            "state_loss": state_loss,
+            "kl_rep": zero,
+            "obs_aux_loss": zero,
+            "cycle": zero,
+            "overshoot_kl": zero,
+            "lambda_pix_eff": torch.tensor(lambda_pix_eff, device=self._device),
+        }
+
+    def update_transition_target_rollout(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+    ) -> dict[str, float]:
+        self._optimizer.zero_grad()
+        loss, info_t = self._target_rollout_forward(images, states, actions)
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            return {k: float(v.detach().item()) for k, v in info_t.items()} | {
+                "total_loss": float("nan")
+            }
+
+        if loss.requires_grad:
+            loss.backward()
+            clip_params = self._optimizer.param_groups[0]["params"]
+            nn.utils.clip_grad_norm_(clip_params, self._cfg.training.grad_clip)
+            self._optimizer.step()
+
+        sched = getattr(self, "_scheduler", None)
+        if sched is not None:
+            sched.step()
+        self._train_step += 1
+
+        return {k: float(v.detach().item()) for k, v in info_t.items()} | {
+            "total_loss": float(loss.detach().item())
+        }
+
+    @torch.no_grad()
+    def evaluate_transition_target_rollout_batch(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+    ) -> dict[str, float]:
+        loss, info_t = self._target_rollout_forward(images, states, actions)
+        return {k: float(v.detach().item()) for k, v in info_t.items()} | {
+            "total_loss": float(loss.detach().item())
+        }
+
     @staticmethod
     def _det_state(post):
         """Return a copy of an RSSM/Token state with stoch replaced by its mean.
@@ -1018,7 +1218,8 @@ class DeepAIFAgent:
     def load_encoder_decoder(self, path: str | Path):
         """Load ONLY encoder + obs_decoder + state_decoder weights from a
         stage-1 (ae) checkpoint.  Leaves the RSSM transition and the optimizer
-        untouched — used by stage-2 (transition) training via --init_from.
+        untouched. Kept for backward compatibility; transition warm-starts
+        should prefer load_world_model_weights().
         """
         ckpt = torch.load(path, map_location=self._device, weights_only=False)
         full_sd = ckpt["world_model"]
@@ -1035,6 +1236,23 @@ class DeepAIFAgent:
                 module.load_state_dict(sub)
                 loaded.append(prefix.rstrip("."))
         print(f"  Loaded encoder-decoder from {path}: {loaded}")
+
+    def load_world_model_weights(self, path: str | Path):
+        """Load full world_model weights without optimizer or preference state."""
+        ckpt = torch.load(path, map_location=self._device, weights_only=False)
+        self.world_model.load_state_dict(ckpt["world_model"])
+        print(f"  Loaded full world_model weights from {path}")
+
+    def set_target_world_model_from_checkpoint(self, path: str | Path):
+        """Create a frozen target world model from a checkpoint."""
+        ckpt = torch.load(path, map_location=self._device, weights_only=False)
+        target = WorldModel(self._cfg).to(self._device)
+        target.load_state_dict(ckpt["world_model"])
+        target.eval()
+        for p in target.parameters():
+            p.requires_grad = False
+        self.target_world_model = target
+        print(f"  Loaded frozen target_world_model from {path}")
 
     def load_checkpoint(self, path: str | Path):
         ckpt = torch.load(path, map_location=self._device, weights_only=False)
