@@ -79,6 +79,34 @@ def _unpack_batch(batch):
     return images, states, actions, obs_labels, bbox
 
 
+def _diagnostic_settings(args, cfg: Config) -> tuple[int, list[int]]:
+    """Return context length and horizons for rollout diagnostic grids."""
+    is_target_rollout = (
+        args.stage == "transition"
+        and getattr(cfg.training, "transition_loss_mode", "") == "target_rollout"
+    )
+    if not is_target_rollout:
+        return (
+            min(5, int(cfg.training.seq_len)),
+            [int(h) for h in args.diag_horizons.split(",")],
+        )
+
+    rollout_horizon = int(getattr(cfg.training, "rollout_horizon", 1))
+    diag_context_len = min(
+        int(getattr(cfg.training, "rollout_context_frames", cfg.training.seq_len)),
+        int(cfg.training.seq_len),
+    )
+    configured_horizons = getattr(cfg.training, "rollout_decode_horizons", None)
+    if configured_horizons:
+        horizons = [int(h) for h in configured_horizons]
+    else:
+        horizons = [1, rollout_horizon]
+    horizons = [h for h in horizons if 1 <= h <= rollout_horizon]
+    if not horizons:
+        horizons = [1]
+    return diag_context_len, horizons
+
+
 # ---------------------------------------------------------------------------
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
@@ -186,7 +214,7 @@ def stage_selection_loss(stage: str, info: dict[str, float]) -> float:
         img_loss + state_loss
 
     transition:
-        target_rollout mode: kl_raw + rollout_pix_mse
+        target_rollout mode: total_loss
         otherwise: kl_dyn + rollout_recon + cycle
 
         cycle is included because cycle-only transition fine-tuning otherwise
@@ -201,9 +229,13 @@ def stage_selection_loss(stage: str, info: dict[str, float]) -> float:
 
     if stage == "transition":
         if "kl_raw" in info or "rollout_pix_mse" in info:
+            if "total_loss" in info:
+                return float(info["total_loss"])
             return float(
-                info.get("kl_raw", 0.0)
+                info.get("kl_train", info.get("kl_raw", 0.0))
+                + info.get("deter_loss", 0.0)
                 + info.get("rollout_pix_mse", 0.0)
+                + info.get("posterior_anchor_loss", 0.0)
             )
         return float(
             info.get("kl_dyn", 0.0)
@@ -297,9 +329,12 @@ def evaluate_world_model(
             "rollout_pix_mse": 0.0,
             "overshoot_kl": 0.0,
             "kl_train": 0.0,
+            "deter_loss": 0.0,
             "posterior_anchor_loss": 0.0,
             "target_img_loss": 0.0,
             "online_img_loss": 0.0,
+            "target_future_img_loss": 0.0,
+            "online_future_img_loss": 0.0,
             "lambda_pix_eff": 0.0,
         }
         n_batches = 0
@@ -776,7 +811,7 @@ def main():
     # Fixed diagnostic window (selected once so successive grids are comparable)
     diag_window = None
     diag_dir = output_dir / "diag"
-    diag_horizons = [int(h) for h in args.diag_horizons.split(",")]
+    diag_context_len, diag_horizons = _diagnostic_settings(args, cfg)
     if args.diag_grid:
         diag_source = args.valid_data if args.valid_data is not None else data_path
         try:
@@ -786,7 +821,9 @@ def main():
             if diag_window is not None:
                 print(f"Diagnostic grid enabled: source={diag_source} "
                       f"window_len={diag_window[0].shape[0]} "
-                      f"local_start={diag_window[3]}")
+                      f"local_start={diag_window[3]} "
+                      f"diag_context_len={diag_context_len} "
+                      f"diag_horizons={diag_horizons}")
         except Exception as e:
             print(f"WARNING: diag window selection failed ({e}); disabling diag grid")
             diag_window = None
@@ -869,6 +906,7 @@ def main():
                     "kl_dyn": f"{info.get('kl_dyn', 0.0):.2f}",
                     "kl_raw": f"{info.get('kl_raw', 0.0):.2f}",
                     "kl_train": f"{info.get('kl_train', 0.0):.2f}",
+                    "deter": f"{info.get('deter_loss', 0.0):.4f}",
                     "pix": f"{info.get('rollout_pix_mse', 0.0):.4f}",
                     "pix_w": f"{info.get('lambda_pix_eff', 0.0):.2f}",
                     "rr": f"{info.get('rollout_recon', 0.0):.4f}",
@@ -884,6 +922,7 @@ def main():
                     f"kl_raw={info.get('kl_raw', 0.0):.2f} "
                     f"kl_clamped={info.get('kl_clamped', 0.0):.2f} "
                     f"kl_train={info.get('kl_train', 0.0):.2f} "
+                    f"deter={info.get('deter_loss', 0.0):.4f} "
                     f"pix={info.get('rollout_pix_mse', 0.0):.4f} "
                     f"pix_w={info.get('lambda_pix_eff', 0.0):.3f} "
                     f"anchor={info.get('posterior_anchor_loss', 0.0):.4f} "
@@ -920,12 +959,15 @@ def main():
                 f"kl_raw={val_info.get('kl_raw', 0.0):.4f} "
                 f"kl_clamped={val_info.get('kl_clamped', 0.0):.4f} "
                 f"kl_train={val_info.get('kl_train', 0.0):.4f} "
+                f"deter={val_info.get('deter_loss', 0.0):.4f} "
                 f"kl_rep={val_info['kl_rep']:.4f} "
                 f"pix={val_info.get('rollout_pix_mse', 0.0):.4f} "
                 f"pix_w={val_info.get('lambda_pix_eff', 0.0):.3f} "
                 f"anchor={val_info.get('posterior_anchor_loss', 0.0):.4f} "
                 f"target_img={val_info.get('target_img_loss', 0.0):.4f} "
                 f"online_img={val_info.get('online_img_loss', 0.0):.4f} "
+                f"target_future_img={val_info.get('target_future_img_loss', 0.0):.4f} "
+                f"online_future_img={val_info.get('online_future_img_loss', 0.0):.4f} "
                 f"rollout_recon={val_info['rollout_recon']:.4f} "
                 f"cycle={val_info.get('cycle', 0.0):.4f} "
                 f"| sel[{args.stage}]={val_sel_loss:.4f}"
@@ -980,7 +1022,7 @@ def main():
                         start_idx=d_start,
                         output_path=str(diag_dir / f"diag_epoch{best_epoch}_best.png"),
                         horizons=diag_horizons,
-                        context_len=min(5, cfg.training.seq_len),
+                        context_len=diag_context_len,
                         device=agent._device,
                         title=f"epoch {best_epoch}  val={last_val_loss}"
                               if last_val_loss is not None else f"epoch {best_epoch}",
@@ -1011,7 +1053,7 @@ def main():
                     start_idx=d_start,
                     output_path=str(diag_dir / f"diag_epoch{epoch + 1}.png"),
                     horizons=diag_horizons,
-                    context_len=min(5, cfg.training.seq_len),
+                    context_len=diag_context_len,
                     device=agent._device,
                     title=f"epoch {epoch + 1}  val={last_val_loss}"
                           if last_val_loss is not None else f"epoch {epoch + 1}",

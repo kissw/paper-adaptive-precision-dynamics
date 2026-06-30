@@ -60,13 +60,15 @@ class TrainingConfig:
     transition_use_target_model: bool = False
     lambda_kl: float = 1.0
     lambda_pix: float = 0.0
+    lambda_deter: float = 1.0
     rollout_horizon: int = 1
     rollout_decode_horizons: list[int] = field(default_factory=lambda: [1])
+    rollout_decode_deterministic: bool = True
     rollout_pix_warmup_steps: int = 0
     free_nats_transition: float | None = None
     transition_use_raw_kl_loss: bool = True
     posterior_anchor_weight: float = 0.0
-    posterior_anchor_horizons: list[int] = field(default_factory=lambda: [0, 1])
+    posterior_anchor_horizons: list[int] = field(default_factory=lambda: [0, 1, 3])
     diag_use_target_recon: bool = False
     stage: str = "joint"        # "joint" | "ae" | "transition" — two-stage training
     ae_kl_rep: float = 0.01     # stage-ae weak posterior KL toward N(0,1); 0=pure AE

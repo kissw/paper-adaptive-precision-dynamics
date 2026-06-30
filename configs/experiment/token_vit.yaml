@@ -116,13 +116,15 @@ training:
   transition_use_target_model: true
   lambda_kl: 1.0
   lambda_pix: 25.0
+  lambda_deter: 1.0
   rollout_horizon: 1
   rollout_decode_horizons: [1]
+  rollout_decode_deterministic: true
   rollout_pix_warmup_steps: 2000
   free_nats_transition: 0.5
   transition_use_raw_kl_loss: true
   posterior_anchor_weight: 0.0
-  posterior_anchor_horizons: [0, 1]
+  posterior_anchor_horizons: [0, 1, 3]
   diag_use_target_recon: false
 
 evaluation:

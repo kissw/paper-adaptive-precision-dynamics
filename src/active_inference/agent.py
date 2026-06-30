@@ -876,8 +876,11 @@ class DeepAIFAgent:
                 "overshoot_kl": zero,
                 "kl_train": zero,
                 "posterior_anchor_loss": zero,
+                "deter_loss": zero,
                 "target_img_loss": zero,
                 "online_img_loss": zero,
+                "target_future_img_loss": zero,
+                "online_future_img_loss": zero,
                 "lambda_pix_eff": zero,
             }
         horizon_eff = min(horizon, T - 1 - context)
@@ -911,22 +914,29 @@ class DeepAIFAgent:
 
         kl_raw_sum = torch.zeros((), device=self._device)
         kl_clamped_sum = torch.zeros((), device=self._device)
+        deter_sum = torch.zeros((), device=self._device)
         pix_sum = torch.zeros((), device=self._device)
         n_pix = 0
         anchor_weight = float(getattr(cfg, "posterior_anchor_weight", 0.0))
-        anchor_horizons = [
-            int(h) for h in getattr(cfg, "posterior_anchor_horizons", [0, 1])
-        ]
-        anchor_indices = sorted(
-            {
-                context + h
-                for h in anchor_horizons
-                if 0 <= context + h < T
-            }
-        )
+        if anchor_weight > 0.0:
+            anchor_horizons = [
+                int(h) for h in getattr(cfg, "posterior_anchor_horizons", [0, 1, 3])
+            ]
+            anchor_indices = sorted(
+                {
+                    context + h
+                    for h in anchor_horizons
+                    if 0 <= context + h < T
+                }
+            )
+        else:
+            anchor_indices = []
         max_anchor_idx = max(anchor_indices) if anchor_indices else -1
         online_anchor_posts = {}
         prev_online = wm.rssm.initial(B, self._device)
+        decode_deterministic = bool(
+            getattr(cfg, "rollout_decode_deterministic", True)
+        )
 
         state_roll = type(target_posts[context])(
             *[x.detach() for x in target_posts[context]]
@@ -963,17 +973,26 @@ class DeepAIFAgent:
                 )
                 kl_raw_sum = kl_raw_sum + kl_raw
                 kl_clamped_sum = kl_clamped_sum + kl_clamped
+                deter_sum = deter_sum + nn.functional.mse_loss(
+                    state_roll.deter,
+                    target_posts[idx].deter.detach(),
+                )
 
                 if h in decode_horizons:
                     # Decoder parameters are frozen, but this forward must keep
                     # gradients to the rollout latent/RSSM prior.
-                    recon_h = wm.decode_obs(state_roll)
+                    decode_state = (
+                        self._det_state(state_roll)
+                        if decode_deterministic else state_roll
+                    )
+                    recon_h = wm.decode_obs(decode_state)
                     target_img = wm.preprocess_image(images[:, idx].to(self._device))
                     pix_sum = pix_sum + (recon_h - target_img).pow(2).mean()
                     n_pix += 1
 
             kl_raw_mean = kl_raw_sum / horizon_eff
             kl_clamped_mean = kl_clamped_sum / horizon_eff
+            deter_loss = deter_sum / horizon_eff
             rollout_pix_mse = pix_sum / max(1, n_pix)
             use_raw_kl = bool(getattr(cfg, "transition_use_raw_kl_loss", True))
             kl_train = kl_raw_mean if use_raw_kl else kl_clamped_mean
@@ -1008,6 +1027,7 @@ class DeepAIFAgent:
 
             lambda_kl = float(getattr(cfg, "lambda_kl", 1.0))
             lambda_pix = float(getattr(cfg, "lambda_pix", 0.0))
+            lambda_deter = float(getattr(cfg, "lambda_deter", 1.0))
             pix_warmup = int(getattr(cfg, "rollout_pix_warmup_steps", 0))
             if pix_warmup > 0:
                 pix_ramp = min(1.0, self._train_step / pix_warmup)
@@ -1016,6 +1036,7 @@ class DeepAIFAgent:
             lambda_pix_eff = lambda_pix * pix_ramp
             loss = (
                 lambda_kl * kl_train
+                + lambda_deter * deter_loss
                 + lambda_pix_eff * rollout_pix_mse
                 + anchor_weight * posterior_anchor_loss
             )
@@ -1048,6 +1069,45 @@ class DeepAIFAgent:
             online_recon_state_ctx = wm.state_decoder(online_feat_ctx)
             online_img_loss = (online_recon_ctx - img_ctx).pow(2).mean()
 
+            target_future_sum = torch.zeros((), device=self._device)
+            online_future_sum = torch.zeros((), device=self._device)
+            n_future = 0
+            future_indices = {
+                context + h
+                for h in decode_horizons
+                if 0 <= context + h < T
+            }
+            online_future_posts = {}
+            if future_indices:
+                prev_future = wm.rssm.initial(B, self._device)
+                for t in range(max(future_indices) + 1):
+                    img_t = wm.preprocess_image(images[:, t].to(self._device))
+                    st_t = states[:, t].to(self._device)
+                    act_t = actions[:, t].to(self._device)
+                    emb_t = wm.encoder(img_t, st_t)
+                    online_post_t, _ = wm.rssm.obs_step(prev_future, act_t, emb_t)
+                    if t in future_indices:
+                        online_future_posts[t] = online_post_t
+                    prev_future = type(online_post_t)(
+                        *[x.detach() for x in online_post_t]
+                    )
+
+            for idx in sorted(future_indices):
+                img_future = wm.preprocess_image(images[:, idx].to(self._device))
+                target_future = wm.decode_obs(self._det_state(target_posts[idx]))
+                online_future = wm.decode_obs(
+                    self._det_state(online_future_posts[idx])
+                )
+                target_future_sum = target_future_sum + (
+                    target_future - img_future
+                ).pow(2).mean()
+                online_future_sum = online_future_sum + (
+                    online_future - img_future
+                ).pow(2).mean()
+                n_future += 1
+            target_future_img_loss = target_future_sum / max(1, n_future)
+            online_future_img_loss = online_future_sum / max(1, n_future)
+
             img_loss = online_img_loss
             from active_inference.utils.transforms import symlog
             state_loss = nn.functional.mse_loss(
@@ -1060,12 +1120,15 @@ class DeepAIFAgent:
             "kl_clamped": kl_clamped_mean,
             "kl_dyn": kl_clamped_mean,
             "kl_train": kl_train,
+            "deter_loss": deter_loss,
             "rollout_pix_mse": rollout_pix_mse,
             "rollout_recon": rollout_pix_mse,
             "img_loss": img_loss,
             "state_loss": state_loss,
             "target_img_loss": target_img_loss,
             "online_img_loss": online_img_loss,
+            "target_future_img_loss": target_future_img_loss,
+            "online_future_img_loss": online_future_img_loss,
             "kl_rep": zero,
             "obs_aux_loss": zero,
             "cycle": zero,
