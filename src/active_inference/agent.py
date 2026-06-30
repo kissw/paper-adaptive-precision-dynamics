@@ -874,6 +874,10 @@ class DeepAIFAgent:
                 "obs_aux_loss": zero,
                 "cycle": zero,
                 "overshoot_kl": zero,
+                "kl_train": zero,
+                "posterior_anchor_loss": zero,
+                "target_img_loss": zero,
+                "online_img_loss": zero,
                 "lambda_pix_eff": zero,
             }
         horizon_eff = min(horizon, T - 1 - context)
@@ -909,6 +913,20 @@ class DeepAIFAgent:
         kl_clamped_sum = torch.zeros((), device=self._device)
         pix_sum = torch.zeros((), device=self._device)
         n_pix = 0
+        anchor_weight = float(getattr(cfg, "posterior_anchor_weight", 0.0))
+        anchor_horizons = [
+            int(h) for h in getattr(cfg, "posterior_anchor_horizons", [0, 1])
+        ]
+        anchor_indices = sorted(
+            {
+                context + h
+                for h in anchor_horizons
+                if 0 <= context + h < T
+            }
+        )
+        max_anchor_idx = max(anchor_indices) if anchor_indices else -1
+        online_anchor_posts = {}
+        prev_online = wm.rssm.initial(B, self._device)
 
         state_roll = type(target_posts[context])(
             *[x.detach() for x in target_posts[context]]
@@ -916,6 +934,19 @@ class DeepAIFAgent:
         with torch.amp.autocast(
             "cuda", enabled=self._use_amp, dtype=self._amp_dtype,
         ):
+            if max_anchor_idx >= 0:
+                for t in range(max_anchor_idx + 1):
+                    img_t = wm.preprocess_image(images[:, t].to(self._device))
+                    st_t = states[:, t].to(self._device)
+                    act_t = actions[:, t].to(self._device)
+                    embed = wm.encoder(img_t, st_t)
+                    post_online, _ = wm.rssm.obs_step(prev_online, act_t, embed)
+                    if t in anchor_indices:
+                        online_anchor_posts[t] = post_online
+                    prev_online = type(post_online)(
+                        *[x.detach() for x in post_online]
+                    )
+
             for h in range(1, horizon_eff + 1):
                 idx = context + h
                 act_h = actions[:, idx].to(self._device)
@@ -944,6 +975,36 @@ class DeepAIFAgent:
             kl_raw_mean = kl_raw_sum / horizon_eff
             kl_clamped_mean = kl_clamped_sum / horizon_eff
             rollout_pix_mse = pix_sum / max(1, n_pix)
+            use_raw_kl = bool(getattr(cfg, "transition_use_raw_kl_loss", True))
+            kl_train = kl_raw_mean if use_raw_kl else kl_clamped_mean
+
+            posterior_anchor_loss = torch.zeros((), device=self._device)
+            n_anchor = 0
+            if anchor_weight > 0.0 and online_anchor_posts:
+                for idx, online_post in online_anchor_posts.items():
+                    target_post = target_posts[idx]
+                    if hasattr(online_post, "token_mean"):
+                        posterior_anchor_loss = posterior_anchor_loss + (
+                            (online_post.token_mean - target_post.token_mean.detach())
+                            .pow(2)
+                            .mean()
+                            + (online_post.deter - target_post.deter.detach())
+                            .pow(2)
+                            .mean()
+                        )
+                    else:
+                        online_mean, online_std = wm.get_kl_stats(online_post)
+                        target_mean, target_std = target_wm.get_kl_stats(target_post)
+                        anchor_raw, _ = compute_transition_target_kl(
+                            online_mean,
+                            online_std,
+                            target_mean,
+                            target_std,
+                            free_nats=0.0,
+                        )
+                        posterior_anchor_loss = posterior_anchor_loss + anchor_raw
+                    n_anchor += 1
+                posterior_anchor_loss = posterior_anchor_loss / max(1, n_anchor)
 
             lambda_kl = float(getattr(cfg, "lambda_kl", 1.0))
             lambda_pix = float(getattr(cfg, "lambda_pix", 0.0))
@@ -953,20 +1014,44 @@ class DeepAIFAgent:
             else:
                 pix_ramp = 1.0
             lambda_pix_eff = lambda_pix * pix_ramp
-            loss = lambda_kl * kl_clamped_mean + lambda_pix_eff * rollout_pix_mse
+            loss = (
+                lambda_kl * kl_train
+                + lambda_pix_eff * rollout_pix_mse
+                + anchor_weight * posterior_anchor_loss
+            )
 
         with torch.no_grad():
             ctx = context
             img_ctx = wm.preprocess_image(images[:, ctx].to(self._device))
             st_ctx = states[:, ctx].to(self._device)
-            det_ctx = self._det_state(target_posts[ctx])
-            recon_ctx = wm.decode_obs(det_ctx)
-            feat_ctx = wm.rssm.get_feat(det_ctx)
-            recon_state_ctx = wm.state_decoder(feat_ctx)
-            img_loss = (recon_ctx - img_ctx).pow(2).mean()
+            target_det_ctx = self._det_state(target_posts[ctx])
+            target_recon_ctx = wm.decode_obs(target_det_ctx)
+            target_feat_ctx = wm.rssm.get_feat(target_det_ctx)
+            target_recon_state_ctx = wm.state_decoder(target_feat_ctx)
+            target_img_loss = (target_recon_ctx - img_ctx).pow(2).mean()
+
+            online_ctx = online_anchor_posts.get(ctx)
+            if online_ctx is None:
+                prev_metric = wm.rssm.initial(B, self._device)
+                for t in range(ctx + 1):
+                    img_t = wm.preprocess_image(images[:, t].to(self._device))
+                    st_t = states[:, t].to(self._device)
+                    act_t = actions[:, t].to(self._device)
+                    emb_t = wm.encoder(img_t, st_t)
+                    online_ctx, _ = wm.rssm.obs_step(prev_metric, act_t, emb_t)
+                    prev_metric = type(online_ctx)(
+                        *[x.detach() for x in online_ctx]
+                    )
+            online_det_ctx = self._det_state(online_ctx)
+            online_recon_ctx = wm.decode_obs(online_det_ctx)
+            online_feat_ctx = wm.rssm.get_feat(online_det_ctx)
+            online_recon_state_ctx = wm.state_decoder(online_feat_ctx)
+            online_img_loss = (online_recon_ctx - img_ctx).pow(2).mean()
+
+            img_loss = online_img_loss
             from active_inference.utils.transforms import symlog
             state_loss = nn.functional.mse_loss(
-                symlog(recon_state_ctx), symlog(st_ctx),
+                symlog(online_recon_state_ctx), symlog(st_ctx),
             )
 
         zero = torch.zeros((), device=self._device)
@@ -974,14 +1059,18 @@ class DeepAIFAgent:
             "kl_raw": kl_raw_mean,
             "kl_clamped": kl_clamped_mean,
             "kl_dyn": kl_clamped_mean,
+            "kl_train": kl_train,
             "rollout_pix_mse": rollout_pix_mse,
             "rollout_recon": rollout_pix_mse,
             "img_loss": img_loss,
             "state_loss": state_loss,
+            "target_img_loss": target_img_loss,
+            "online_img_loss": online_img_loss,
             "kl_rep": zero,
             "obs_aux_loss": zero,
             "cycle": zero,
             "overshoot_kl": zero,
+            "posterior_anchor_loss": posterior_anchor_loss,
             "lambda_pix_eff": torch.tensor(lambda_pix_eff, device=self._device),
         }
 

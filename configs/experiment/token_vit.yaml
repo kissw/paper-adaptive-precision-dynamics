@@ -120,6 +120,10 @@ training:
   rollout_decode_horizons: [1]
   rollout_pix_warmup_steps: 2000
   free_nats_transition: 0.5
+  transition_use_raw_kl_loss: true
+  posterior_anchor_weight: 0.0
+  posterior_anchor_horizons: [0, 1]
+  diag_use_target_recon: false
 
 evaluation:
   episodes: 5

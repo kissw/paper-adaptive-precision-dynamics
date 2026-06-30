@@ -296,6 +296,10 @@ def evaluate_world_model(
             "kl_clamped": 0.0,
             "rollout_pix_mse": 0.0,
             "overshoot_kl": 0.0,
+            "kl_train": 0.0,
+            "posterior_anchor_loss": 0.0,
+            "target_img_loss": 0.0,
+            "online_img_loss": 0.0,
             "lambda_pix_eff": 0.0,
         }
         n_batches = 0
@@ -864,7 +868,9 @@ def main():
                     "loss": f"{info['total_loss']:.3f}",
                     "kl_dyn": f"{info.get('kl_dyn', 0.0):.2f}",
                     "kl_raw": f"{info.get('kl_raw', 0.0):.2f}",
+                    "kl_train": f"{info.get('kl_train', 0.0):.2f}",
                     "pix": f"{info.get('rollout_pix_mse', 0.0):.4f}",
+                    "pix_w": f"{info.get('lambda_pix_eff', 0.0):.2f}",
                     "rr": f"{info.get('rollout_recon', 0.0):.4f}",
                     "cyc": f"{info.get('cycle', 0.0):.2f}",
                 })
@@ -877,7 +883,10 @@ def main():
                     f"kl_dyn={info.get('kl_dyn', 0.0):.2f} "
                     f"kl_raw={info.get('kl_raw', 0.0):.2f} "
                     f"kl_clamped={info.get('kl_clamped', 0.0):.2f} "
+                    f"kl_train={info.get('kl_train', 0.0):.2f} "
                     f"pix={info.get('rollout_pix_mse', 0.0):.4f} "
+                    f"pix_w={info.get('lambda_pix_eff', 0.0):.3f} "
+                    f"anchor={info.get('posterior_anchor_loss', 0.0):.4f} "
                     f"rr={info.get('rollout_recon', 0.0):.4f} "
                     f"rr_w={info.get('eff_rr_weight', 0.0):.3f} "
                     f"cyc={info.get('cycle', 0.0):.3f} "
@@ -910,8 +919,13 @@ def main():
                 f"kl_dyn={val_info['kl_dyn']:.4f} "
                 f"kl_raw={val_info.get('kl_raw', 0.0):.4f} "
                 f"kl_clamped={val_info.get('kl_clamped', 0.0):.4f} "
+                f"kl_train={val_info.get('kl_train', 0.0):.4f} "
                 f"kl_rep={val_info['kl_rep']:.4f} "
                 f"pix={val_info.get('rollout_pix_mse', 0.0):.4f} "
+                f"pix_w={val_info.get('lambda_pix_eff', 0.0):.3f} "
+                f"anchor={val_info.get('posterior_anchor_loss', 0.0):.4f} "
+                f"target_img={val_info.get('target_img_loss', 0.0):.4f} "
+                f"online_img={val_info.get('online_img_loss', 0.0):.4f} "
                 f"rollout_recon={val_info['rollout_recon']:.4f} "
                 f"cycle={val_info.get('cycle', 0.0):.4f} "
                 f"| sel[{args.stage}]={val_sel_loss:.4f}"
