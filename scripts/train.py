@@ -53,8 +53,8 @@ def _select_diag_window(h5_path: str, seq_len: int, start_idx: int | None):
         if win_end - win_start < 2:
             return None
 
-        images  = torch.from_numpy(f["images"][win_start:win_end]).float()
-        states  = torch.from_numpy(f["states"][win_start:win_end]).float()
+        images = torch.from_numpy(f["images"][win_start:win_end]).float()
+        states = torch.from_numpy(f["states"][win_start:win_end]).float()
         actions = torch.from_numpy(f["actions"][win_start:win_end]).float()
 
     # Rollout start position within the window
@@ -151,8 +151,8 @@ def build_checkpoint(
         "best_loss": float(best_loss) if best_loss is not None else None,
         "train_loss": float(train_loss) if train_loss is not None else None,
         "val_loss": float(val_loss) if val_loss is not None else None,
-        # Per-term validation metrics (img/state/kl_dyn/kl_rep/rollout_recon)
-        # so each epoch's component losses are inspectable from the checkpoint.
+        # Per-term validation metrics so each epoch's component losses are
+        # inspectable from the checkpoint.
         "val_metrics": (
             {k: float(v) for k, v in val_metrics.items()}
             if val_metrics is not None else None
@@ -177,23 +177,35 @@ def build_checkpoint(
     }
 
 
+
 @torch.no_grad()
 def stage_selection_loss(stage: str, info: dict[str, float]) -> float:
     """Pick the best.pt selection scalar appropriate to the training stage.
 
-    ae         : img_loss + state_loss  (reconstruction is the AE objective;
-                 the untrained transition's huge KL must not dominate selection).
-    transition : kl_dyn + rollout_recon  (frozen recon is monitoring-only; the
-                 prior's predictive quality is what improves).  If free_nats
-                 clamps kl_dyn to a floor, rollout_recon carries the signal.
-    joint      : total_loss  (original full VFE behaviour — regression).
+    ae:
+        img_loss + state_loss
+
+    transition:
+        kl_dyn + rollout_recon + cycle
+
+        cycle is included because cycle-only transition fine-tuning otherwise
+        cannot affect best.pt selection. When cycle is disabled or not computed,
+        info["cycle"] defaults to 0.0, preserving old behavior.
+
+    joint:
+        total_loss
     """
     if stage == "ae":
         return float(info.get("img_loss", 0.0) + info.get("state_loss", 0.0))
-    if stage == "transition":
-        return float(info.get("kl_dyn", 0.0) + info.get("rollout_recon", 0.0))
-    return float(info["total_loss"])
 
+    if stage == "transition":
+        return float(
+            info.get("kl_dyn", 0.0)
+            + info.get("rollout_recon", 0.0)
+            + info.get("cycle", 0.0)
+        )
+
+    return float(info["total_loss"])
 
 def _evaluate_ae(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
     """AE-stage validation: same deterministic forward as agent.update_ae.
@@ -205,9 +217,16 @@ def _evaluate_ae(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
     was_training = wm.training
     wm.eval()
 
-    totals = {"total_loss": 0.0, "img_loss": 0.0, "state_loss": 0.0,
-              "kl_dyn": 0.0, "kl_rep": 0.0, "obs_aux_loss": 0.0,
-              "rollout_recon": 0.0}
+    totals = {
+        "total_loss": 0.0,
+        "img_loss": 0.0,
+        "state_loss": 0.0,
+        "kl_dyn": 0.0,
+        "kl_rep": 0.0,
+        "obs_aux_loss": 0.0,
+        "rollout_recon": 0.0,
+        "cycle": 0.0,
+    }
     n_batches = 0
 
     for batch in tqdm(dataloader, desc="Validation(ae)", leave=False):
@@ -219,9 +238,9 @@ def _evaluate_ae(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
         img = acc["img_loss"] / valid_steps
         state = acc["state_loss"] / valid_steps
         kl_rep = acc["kl_rep"] / valid_steps
-        totals["img_loss"]   += img
+        totals["img_loss"] += img
         totals["state_loss"] += state
-        totals["kl_rep"]     += kl_rep
+        totals["kl_rep"] += kl_rep
         # total_loss for ae monitoring = reconstruction (KL is monitoring-only)
         totals["total_loss"] += img + state
 
@@ -232,14 +251,14 @@ def _evaluate_ae(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
     return {k: v / n_batches for k, v in totals.items()}
 
 
+
 def evaluate_world_model(
     agent: DeepAIFAgent, dataloader, stage: str = "joint",
 ) -> dict[str, float]:
     """Evaluate world-model losses on a held-out HDF5 split.
 
-    stage="ae"  → deterministic encode→decode path (mirrors update_ae) so val
-                  img/state reflect the AE reconstruction objective.
-    otherwise   → full VFE via the transition (obs_step) path.
+    stage="ae": deterministic encode-decode path, mirroring update_ae.
+    otherwise: full VFE via the transition obs_step path.
 
     Dataset convention:
         action[t] is the action applied by env.step(action[t]) that produced
@@ -253,9 +272,32 @@ def evaluate_world_model(
     device = agent._device
     cfg = agent._cfg.training
     beta_obstacle_aux = getattr(cfg, "beta_obstacle_aux", 0.0)
+
     rr_horizon = getattr(cfg, "rollout_recon_horizon", 0)
     rr_weight = getattr(cfg, "rollout_recon_weight", 0.0)
     eval_rollout = rr_horizon > 0 and rr_weight > 0.0
+
+    cycle_horizon = getattr(cfg, "cycle_horizon", 0)
+    cycle_weight = getattr(cfg, "cycle_weight", 0.0)
+    eval_cycle = cycle_horizon > 0 and cycle_weight > 0.0
+
+    rollout_single_shot = bool(getattr(cfg, "rollout_single_shot", False))
+    rollout_P = int(getattr(cfg, "rollout_context_frames", 25))
+
+    eval_horizon_eff = max(
+        rr_horizon if eval_rollout else 0,
+        cycle_horizon if eval_cycle else 0,
+    )
+
+    img_recon_obs_w = getattr(cfg, "img_recon_obstacle_weight", 1.0)
+    rollout_recon_obs_w = getattr(cfg, "rollout_recon_obstacle_weight", 1.0)
+    rollout_recon_decay = getattr(cfg, "rollout_recon_step_decay", 0.0)
+
+    obstacle_token_weight = getattr(cfg, "obstacle_token_weight", 1.0)
+    _tv = getattr(agent._cfg, "token_vit", None)
+    _is_vit = wm._wm_type == "token_vit"
+    _crop = bool(getattr(agent._cfg.encoder, "crop_road", False))
+    _keep_frac = float(getattr(agent._cfg.encoder, "keep_bottom_frac", 0.6))
 
     was_training = wm.training
     wm.eval()
@@ -269,15 +311,43 @@ def evaluate_world_model(
         "kl_rep": 0.0,
         "obs_aux_loss": 0.0,
         "rollout_recon": 0.0,
+        "cycle": 0.0,
     }
-
-    img_recon_obs_w = getattr(cfg, "img_recon_obstacle_weight", 1.0)
 
     for batch in tqdm(dataloader, desc="Validation", leave=False):
         images, states, actions, obs_labels, obstacle_bbox = _unpack_batch(batch)
 
         B, T = images.shape[0], images.shape[1]
         prev_state = wm.rssm.initial(B, device)
+
+        # Recompute stop-grad posterior references for validation cycle metric.
+        # This mirrors the reference pass in DeepAIFAgent.update().
+        posteriors_ref = []
+        if eval_cycle:
+            prev_ref = wm.rssm.initial(B, device)
+            with torch.no_grad():
+                with torch.amp.autocast(
+                    "cuda",
+                    enabled=agent._use_amp,
+                    dtype=agent._amp_dtype,
+                ):
+                    for tt in range(T):
+                        img_ref = wm.preprocess_image(images[:, tt].to(device))
+                        st_ref = states[:, tt].to(device)
+                        act_ref = actions[:, tt].to(device)
+                        emb_ref = wm.encoder(img_ref, st_ref)
+                        post_ref, _ = wm.rssm.obs_step(prev_ref, act_ref, emb_ref)
+                        posteriors_ref.append(post_ref)
+                        prev_ref = type(post_ref)(
+                            *[x.detach() for x in post_ref]
+                        )
+
+        use_token_weight = (
+            obstacle_token_weight > 1.0
+            and _is_vit
+            and obstacle_bbox is not None
+            and _tv is not None
+        )
 
         batch_total = 0.0
         batch_accum = {
@@ -287,6 +357,7 @@ def evaluate_world_model(
             "kl_rep": 0.0,
             "obs_aux_loss": 0.0,
             "rollout_recon": 0.0,
+            "cycle": 0.0,
         }
         valid_steps = 0
 
@@ -296,8 +367,11 @@ def evaluate_world_model(
             st_t = states[:, t].to(device)
             act_t = actions[:, t].to(device)
 
-            with torch.amp.autocast("cuda", enabled=agent._use_amp,
-                                    dtype=agent._amp_dtype):
+            with torch.amp.autocast(
+                "cuda",
+                enabled=agent._use_amp,
+                dtype=agent._amp_dtype,
+            ):
                 embed = wm.encoder(img_t, st_t)
                 post, prior = wm.rssm.obs_step(prev_state, act_t, embed)
 
@@ -339,21 +413,84 @@ def evaluate_world_model(
                     loss = loss + beta_obstacle_aux * obs_aux
                     obs_aux_loss_val = obs_aux.item()
 
-            # Multi-step pixel rollout reconstruction (eval, no backward).
-            # Needed so transition-stage selection can use rollout quality.
+            # Multi-step validation metrics, no backward.
+            # rollout_recon: decoded prior rollout image MSE.
+            # cycle: prior rollout latent mean vs stop-grad posterior latent mean.
             rr_val = 0.0
-            if eval_rollout and t + 1 < T:
-                n_rr = min(rr_horizon, T - 1 - t)
-                if n_rr > 0:
-                    s_rr = post
-                    rr_sum = 0.0
-                    for h in range(1, n_rr + 1):
-                        a_rr = actions[:, t + h].to(device)
-                        s_rr = wm.rssm.img_step(s_rr, a_rr)
-                        rec = wm.decode_obs(s_rr)
-                        tgt = wm.preprocess_image(images[:, t + h].to(device))
-                        rr_sum += (rec - tgt).pow(2).mean().item()
-                    rr_val = rr_sum / n_rr
+            cycle_val = 0.0
+
+            if (eval_rollout or eval_cycle) and t + 1 < T and eval_horizon_eff > 0:
+                should_eval_here = True
+                if rollout_single_shot:
+                    should_eval_here = (t == rollout_P - 1)
+
+                if should_eval_here:
+                    n_roll = min(eval_horizon_eff, T - 1 - t)
+                    if n_roll > 0:
+                        s_roll = type(post)(*[x.detach() for x in post])
+                        rr_sum = 0.0
+                        cycle_sum = 0.0
+                        n_rr = 0
+                        n_cyc = 0
+
+                        for h in range(1, n_roll + 1):
+                            idx = t + h
+                            a_roll = actions[:, idx].to(device)
+                            s_roll = wm.rssm.img_step(s_roll, a_roll)
+
+                            if eval_rollout and h <= rr_horizon:
+                                rec = wm.decode_obs(s_roll)
+                                tgt = wm.preprocess_image(images[:, idx].to(device))
+                                mse = (rec - tgt).pow(2)
+
+                                if (
+                                    rollout_recon_obs_w > 1.0
+                                    and obstacle_bbox is not None
+                                ):
+                                    w_map = DeepAIFAgent._bbox_weight_map(
+                                        obstacle_bbox[:, idx],
+                                        rec.shape,
+                                        rollout_recon_obs_w,
+                                        device,
+                                    )
+                                    mse = mse * w_map
+
+                                step_w = (1.0 - rollout_recon_decay) ** (h - 1)
+                                rr_sum += step_w * mse.mean().item()
+                                n_rr += 1
+
+                            if (
+                                eval_cycle
+                                and h <= cycle_horizon
+                                and idx < len(posteriors_ref)
+                            ):
+                                pm, _ = wm.get_kl_stats(s_roll)
+                                qm, _ = wm.get_kl_stats(posteriors_ref[idx])
+                                sq = (pm - qm.detach()).pow(2)
+
+                                if use_token_weight and pm.ndim == 3:
+                                    tok_mask = DeepAIFAgent._bbox_token_mask(
+                                        obstacle_bbox[:, idx],
+                                        pm.shape[1],
+                                        _tv.image_size,
+                                        _tv.patch_size,
+                                        device,
+                                        crop_road=_crop,
+                                        keep_bottom_frac=_keep_frac,
+                                    )
+                                    w_tok = (
+                                        1.0
+                                        + (obstacle_token_weight - 1.0) * tok_mask
+                                    )
+                                    sq = sq * w_tok.unsqueeze(-1)
+
+                                cycle_sum += sq.mean().item()
+                                n_cyc += 1
+
+                        if n_rr > 0:
+                            rr_val = rr_sum / n_rr
+                        if n_cyc > 0:
+                            cycle_val = cycle_sum / n_cyc
 
             if torch.isnan(loss) or torch.isinf(loss):
                 prev_state = type(post)(*[x.detach() for x in post])
@@ -364,6 +501,7 @@ def evaluate_world_model(
                 batch_accum[k] += info[k].item()
             batch_accum["obs_aux_loss"] += obs_aux_loss_val
             batch_accum["rollout_recon"] += rr_val
+            batch_accum["cycle"] += cycle_val
             valid_steps += 1
 
             prev_state = type(post)(*[x.detach() for x in post])
@@ -380,7 +518,6 @@ def evaluate_world_model(
     if n_batches == 0:
         return {k: float("nan") for k in totals}
     return {k: v / n_batches for k, v in totals.items()}
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -446,7 +583,7 @@ def main():
     )
     parser.add_argument(
         "--num_workers", type=int, default=10,
-        help="DataLoader CPU worker 개수 (also caps torch intra-op threads)",
+        help="DataLoader CPU worker  (also caps torch intra-op threads)",
     )
     parser.add_argument(
         "--stage", choices=["joint", "ae", "transition"], default="joint",
@@ -555,7 +692,7 @@ def main():
                 start_epoch = int(m.group(1))
                 print(f"Auto-detected start epoch: {start_epoch}")
 
-    # LR schedule: warmup → cosine decay over the full run (after any resume,
+    # LR schedule: warmup � cosine decay over the full run (after any resume,
     # so the scheduler binds to the final optimizer instance).
     total_train_steps = cfg.training.epochs * len(dataloader)
     # Resume the cycle_weight warmup counter so it doesn't restart from 0.
@@ -703,13 +840,14 @@ def main():
                 f"kl_dyn={val_info['kl_dyn']:.4f} "
                 f"kl_rep={val_info['kl_rep']:.4f} "
                 f"rollout_recon={val_info['rollout_recon']:.4f} "
+                f"cycle={val_info.get('cycle', 0.0):.4f} "
                 f"| sel[{args.stage}]={val_sel_loss:.4f}"
             )
 
         # Stage-aware best.pt selection:
-        #   ae         → img+state recon
-        #   transition → kl_dyn + rollout_recon
-        #   joint      → full VFE total_loss
+        #   ae         � img+state recon
+        #   transition � kl_dyn + rollout_recon + cycle
+        #   joint      � full VFE total_loss
         # Falls back to the train-side stage selection when no valid split.
         if valid_loader is not None:
             selection_loss = val_sel_loss
@@ -761,7 +899,7 @@ def main():
                               if last_val_loss is not None else f"epoch {best_epoch}",
                     )
                     if ok:
-                        print(f"  Diagnostic grid → "
+                        print(f"  Diagnostic grid � "
                               f"{diag_dir / f'diag_epoch{best_epoch}_best.png'}")
                 except Exception as e:
                     print(f"  WARNING: diag grid failed: {e}")

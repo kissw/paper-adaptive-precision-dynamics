@@ -593,7 +593,16 @@ class DeepAIFAgent:
                 # leaving only the KL terms (+ overshoot + rollout_recon below).
                 # img_loss/state_loss remain in `info` for monitoring/logging.
                 if self._stage == "transition":
-                    loss = loss - info["img_loss"] - info["state_loss"]
+                    # Transition stage should train the prior/img_step only.
+                    # Encoder/decoders are frozen, and posterior representation
+                    # should not be pulled away from the decoder-compatible AE
+                    # manifold. Remove img/state/kl_rep gradients from VFE.
+                    loss = (
+                        loss
+                        - info["img_loss"]
+                        - info["state_loss"]
+                        - cfg.kl_rep_scale * info["kl_rep"]
+                    )
 
                 # A1: warp smoothness regularization (set by last img_step call)
                 if warp_smoothness_weight > 0 and hasattr(wm.rssm, "warp_smoothness_loss"):
@@ -614,7 +623,7 @@ class DeepAIFAgent:
                 # and adds its loss to THIS timestep's loss so the per-timestep
                 # backward below covers it in a single graph.
                 if rollout_single_shot and (do_rr or do_cycle) and t == rollout_P - 1 and t + 1 < T:
-                    state_ss = post
+                    state_ss = type(post)(*[x.detach() for x in post])
                     rr_loss    = torch.zeros((), device=self._device)
                     cycle_loss = torch.zeros((), device=self._device)
                     n_cyc = 0
@@ -666,7 +675,7 @@ class DeepAIFAgent:
                 if (not rollout_single_shot) and (do_rr or do_cycle) and t + 1 < T:
                     n_rr = min(rr_horizon_eff, T - 1 - t)
                     if n_rr > 0:
-                        state_rr = post
+                        state_rr = type(post)(*[x.detach() for x in post])
                         rr_loss    = torch.zeros((), device=self._device)
                         cycle_loss = torch.zeros((), device=self._device)
                         n_cyc = 0
@@ -750,7 +759,7 @@ class DeepAIFAgent:
                 osh_kl_val = 0.0
                 if posteriors_ref and overshoot_horizon > 0 and t + 1 < T:
                     n_steps = min(overshoot_horizon, T - 1 - t)
-                    state_d = post
+                    state_d = type(post)(*[x.detach() for x in post])
                     osh_kl = torch.zeros((), device=self._device)
                     for d in range(1, n_steps + 1):
                         act_td = actions[:, t + d].to(self._device)
@@ -813,7 +822,8 @@ class DeepAIFAgent:
             {k: v / T for k, v in accum.items()}
             | {"total_loss": total_loss_value,
                "rr_ramp": rr_ramp, "cycle_ramp": ramp,
-               "eff_rr_weight": eff_rr_weight}
+               "eff_rr_weight": eff_rr_weight,
+               "eff_cycle_weight": eff_cycle_weight}
         )
 
     @staticmethod
