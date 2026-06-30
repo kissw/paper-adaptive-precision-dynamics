@@ -1,0 +1,6 @@
+[
+  {"name": "vit_trans_base", "config": "configs/experiment/token_vit.yaml",
+   "checkpoint": "outputs/v6_vit_trans_cyc_base/checkpoints/best.pt", "overrides": []},
+  {"name": "vit_trans_obs5", "config": "configs/experiment/token_vit.yaml",
+   "checkpoint": "outputs/v6_vit_trans_cyc_obs5/checkpoints/best.pt", "overrides": []}
+]
