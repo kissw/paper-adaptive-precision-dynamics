@@ -813,6 +813,7 @@ def main():
                     f"rr_w={info.get('eff_rr_weight', 0.0):.3f} "
                     f"cyc={info.get('cycle', 0.0):.3f} "
                     f"lr={cur_lr:.2e}",
+                    f"cyc_w={info.get('eff_cycle_weight', 0.0):.2e} ",
                     flush=True,
                 )
 
