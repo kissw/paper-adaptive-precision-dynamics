@@ -70,6 +70,12 @@ class TrainingConfig:
     posterior_anchor_weight: float = 0.0
     posterior_anchor_horizons: list[int] = field(default_factory=lambda: [0, 1, 3])
     diag_use_target_recon: bool = False
+    bbox_pix_weight: float = 0.0
+    bbox_deter_weight: float = 0.0
+    bbox_mask_dilate: int = 0
+    bbox_min_area: float = 1.0
+    bbox_weight_mode: str = "additive"
+    bbox_coord_space: str = "raw"  # "raw" dataset coords | "model" preprocessed coords
     stage: str = "joint"        # "joint" | "ae" | "transition" — two-stage training
     ae_kl_rep: float = 0.01     # stage-ae weak posterior KL toward N(0,1); 0=pure AE
 

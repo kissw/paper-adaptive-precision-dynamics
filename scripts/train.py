@@ -335,13 +335,18 @@ def evaluate_world_model(
             "online_img_loss": 0.0,
             "target_future_img_loss": 0.0,
             "online_future_img_loss": 0.0,
+            "rollout_bbox_mse": 0.0,
+            "rollout_plain_pix_mse": 0.0,
+            "bbox_valid_frac": 0.0,
+            "bbox_deter_loss": 0.0,
+            "bbox_token_count": 0.0,
             "lambda_pix_eff": 0.0,
         }
         n_batches = 0
         for batch in tqdm(dataloader, desc="Validation(target_rollout)", leave=False):
-            images, states, actions, _, _ = _unpack_batch(batch)
+            images, states, actions, _, obstacle_bbox = _unpack_batch(batch)
             info = agent.evaluate_transition_target_rollout_batch(
-                images, states, actions,
+                images, states, actions, obstacle_bbox=obstacle_bbox,
             )
             n_batches += 1
             for k in totals:
@@ -908,6 +913,7 @@ def main():
                     "kl_train": f"{info.get('kl_train', 0.0):.2f}",
                     "deter": f"{info.get('deter_loss', 0.0):.4f}",
                     "pix": f"{info.get('rollout_pix_mse', 0.0):.4f}",
+                    "bbox_pix": f"{info.get('rollout_bbox_mse', 0.0):.4f}",
                     "pix_w": f"{info.get('lambda_pix_eff', 0.0):.2f}",
                     "rr": f"{info.get('rollout_recon', 0.0):.4f}",
                     "cyc": f"{info.get('cycle', 0.0):.2f}",
@@ -924,6 +930,11 @@ def main():
                     f"kl_train={info.get('kl_train', 0.0):.2f} "
                     f"deter={info.get('deter_loss', 0.0):.4f} "
                     f"pix={info.get('rollout_pix_mse', 0.0):.4f} "
+                    f"bbox_pix={info.get('rollout_bbox_mse', 0.0):.4f} "
+                    f"plain_pix={info.get('rollout_plain_pix_mse', 0.0):.4f} "
+                    f"bbox_deter={info.get('bbox_deter_loss', 0.0):.4f} "
+                    f"bbox_valid={info.get('bbox_valid_frac', 0.0):.3f} "
+                    f"bbox_tok={info.get('bbox_token_count', 0.0):.1f} "
                     f"pix_w={info.get('lambda_pix_eff', 0.0):.3f} "
                     f"anchor={info.get('posterior_anchor_loss', 0.0):.4f} "
                     f"rr={info.get('rollout_recon', 0.0):.4f} "
@@ -962,6 +973,11 @@ def main():
                 f"deter={val_info.get('deter_loss', 0.0):.4f} "
                 f"kl_rep={val_info['kl_rep']:.4f} "
                 f"pix={val_info.get('rollout_pix_mse', 0.0):.4f} "
+                f"bbox_pix={val_info.get('rollout_bbox_mse', 0.0):.4f} "
+                f"plain_pix={val_info.get('rollout_plain_pix_mse', 0.0):.4f} "
+                f"bbox_deter={val_info.get('bbox_deter_loss', 0.0):.4f} "
+                f"bbox_valid={val_info.get('bbox_valid_frac', 0.0):.3f} "
+                f"bbox_tok={val_info.get('bbox_token_count', 0.0):.1f} "
                 f"pix_w={val_info.get('lambda_pix_eff', 0.0):.3f} "
                 f"anchor={val_info.get('posterior_anchor_loss', 0.0):.4f} "
                 f"target_img={val_info.get('target_img_loss', 0.0):.4f} "

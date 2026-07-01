@@ -126,6 +126,12 @@ training:
   posterior_anchor_weight: 0.0
   posterior_anchor_horizons: [0, 1, 3]
   diag_use_target_recon: false
+  bbox_pix_weight: 0.0
+  bbox_deter_weight: 0.0
+  bbox_mask_dilate: 0
+  bbox_min_area: 1.0
+  bbox_weight_mode: "additive"
+  bbox_coord_space: "raw"
 
 evaluation:
   episodes: 5

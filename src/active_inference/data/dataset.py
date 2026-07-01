@@ -39,8 +39,10 @@ class SequenceDataset(Dataset):
                     dtype=torch.float32,
                 )
 
-            # Frame-level obstacle bounding boxes (xyxy pixel coords in model
-            # image space).  Used for obstacle-region recon upweighting.
+            # Frame-level obstacle bounding boxes. Current v5/v6 datasets store
+            # xyxy pixel coords in raw/original image space; training bbox
+            # weighting maps them into model/preprocessed image space when
+            # crop_road is enabled.
             # NaN rows (no visible obstacle) are treated as "no box" → the
             # weight-map helper produces a uniform (all-ones) map.
             if "obstacle_bbox" in f:

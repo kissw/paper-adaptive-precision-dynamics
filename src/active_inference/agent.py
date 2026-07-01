@@ -20,6 +20,11 @@ from active_inference.training.losses import (
     compute_vfe,
 )
 from active_inference.training.preference import PreferenceModel
+from active_inference.utils.bbox import (
+    bbox_xyxy_to_mask,
+    bbox_xyxy_to_model_space,
+    bbox_xyxy_to_token_mask,
+)
 from active_inference.utils.transforms import crop_road as _crop_road
 
 
@@ -449,6 +454,51 @@ class DeepAIFAgent:
                     mask[b, i] = 1.0
         return mask
 
+    @staticmethod
+    def _bbox_model_mask(
+        bbox: Tensor,
+        img_shape,
+        device,
+        crop_road: bool = False,
+        keep_bottom_frac: float = 0.6,
+        min_area: float = 1.0,
+        dilate: int = 0,
+    ) -> tuple[Tensor, Tensor]:
+        """Return (B,1,H,W) bbox mask and (B,) validity in model image space."""
+        B, _, H, W = img_shape
+        mask = torch.zeros(B, 1, H, W, device=device)
+        valid = torch.zeros(B, device=device, dtype=torch.bool)
+        bbox = bbox.to(device).float()
+        bbox = DeepAIFAgent._flip_bbox_x(bbox, W)
+
+        start = H * (1.0 - keep_bottom_frac)
+        crop_h = H - start
+        ys = torch.arange(H, device=device).view(H, 1)
+        xs = torch.arange(W, device=device).view(1, W)
+        dilate = max(0, int(dilate))
+
+        for b in range(B):
+            x1, y1, x2, y2 = bbox[b]
+            if torch.isnan(bbox[b]).any() or x2 <= x1 or y2 <= y1:
+                continue
+            if crop_road:
+                y1 = (y1 - start) * H / crop_h
+                y2 = (y2 - start) * H / crop_h
+            x1 = max(0.0, float(x1) - dilate)
+            x2 = min(float(W), float(x2) + dilate)
+            y1 = max(0.0, float(y1) - dilate)
+            y2 = min(float(H), float(y2) + dilate)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            area = (x2 - x1) * (y2 - y1)
+            if area < min_area:
+                continue
+            inside = (ys >= y1) & (ys < y2) & (xs >= x1) & (xs < x2)
+            if inside.any():
+                mask[b, 0] = inside.float()
+                valid[b] = True
+        return mask, valid
+
     def update(
         self,
         images: Tensor,
@@ -463,7 +513,9 @@ class DeepAIFAgent:
             and getattr(cfg, "transition_loss_mode", "") == "target_rollout"
             and self.target_world_model is not None
         ):
-            return self.update_transition_target_rollout(images, states, actions)
+            return self.update_transition_target_rollout(
+                images, states, actions, obstacle_bbox=obstacle_bbox,
+            )
 
         # Per-timestep backward with NaN guard, AMP, and CUDA error recovery
         # obstacle_labels: [B, T] binary (1=obstacle visible, 0=clear)
@@ -843,6 +895,7 @@ class DeepAIFAgent:
         images: Tensor,
         states: Tensor,
         actions: Tensor,
+        obstacle_bbox: Tensor | None = None,
     ) -> tuple[Tensor, dict[str, Tensor]]:
         """Transition-stage target posterior rollout objective."""
         if self.target_world_model is None:
@@ -881,6 +934,11 @@ class DeepAIFAgent:
                 "online_img_loss": zero,
                 "target_future_img_loss": zero,
                 "online_future_img_loss": zero,
+                "rollout_bbox_mse": zero,
+                "rollout_plain_pix_mse": zero,
+                "bbox_valid_frac": zero,
+                "bbox_deter_loss": zero,
+                "bbox_token_count": zero,
                 "lambda_pix_eff": zero,
             }
         horizon_eff = min(horizon, T - 1 - context)
@@ -916,7 +974,24 @@ class DeepAIFAgent:
         kl_clamped_sum = torch.zeros((), device=self._device)
         deter_sum = torch.zeros((), device=self._device)
         pix_sum = torch.zeros((), device=self._device)
+        plain_pix_sum = torch.zeros((), device=self._device)
+        bbox_pix_sum = torch.zeros((), device=self._device)
+        bbox_pix_count = 0
+        bbox_valid_count = 0
+        bbox_total_count = 0
+        bbox_deter_sum = torch.zeros((), device=self._device)
+        bbox_deter_count = 0
+        bbox_token_count_sum = torch.zeros((), device=self._device)
         n_pix = 0
+        bbox_pix_weight = float(getattr(cfg, "bbox_pix_weight", 0.0))
+        bbox_deter_weight = float(getattr(cfg, "bbox_deter_weight", 0.0))
+        bbox_mask_dilate = int(getattr(cfg, "bbox_mask_dilate", 0))
+        bbox_min_area = float(getattr(cfg, "bbox_min_area", 1.0))
+        bbox_weight_mode = getattr(cfg, "bbox_weight_mode", "additive")
+        bbox_coord_space = getattr(cfg, "bbox_coord_space", "raw")
+        _crop = bool(getattr(self._cfg.encoder, "crop_road", False))
+        _keep_frac = float(getattr(self._cfg.encoder, "keep_bottom_frac", 0.6))
+        _tv = getattr(self._cfg, "token_vit", None)
         anchor_weight = float(getattr(cfg, "posterior_anchor_weight", 0.0))
         if anchor_weight > 0.0:
             anchor_horizons = [
@@ -937,6 +1012,17 @@ class DeepAIFAgent:
         decode_deterministic = bool(
             getattr(cfg, "rollout_decode_deterministic", True)
         )
+
+        def bbox_for_model(bbox_h: Tensor, image_h: int, image_w: int) -> Tensor:
+            return bbox_xyxy_to_model_space(
+                bbox_h.to(self._device),
+                image_h=image_h,
+                image_w=image_w,
+                crop_road=_crop,
+                keep_bottom_frac=_keep_frac,
+                coord_space=bbox_coord_space,
+                min_area=bbox_min_area,
+            )
 
         state_roll = type(target_posts[context])(
             *[x.detach() for x in target_posts[context]]
@@ -973,10 +1059,40 @@ class DeepAIFAgent:
                 )
                 kl_raw_sum = kl_raw_sum + kl_raw
                 kl_clamped_sum = kl_clamped_sum + kl_clamped
-                deter_sum = deter_sum + nn.functional.mse_loss(
-                    state_roll.deter,
-                    target_posts[idx].deter.detach(),
-                )
+                deter_sq = (state_roll.deter - target_posts[idx].deter.detach()).pow(2)
+                plain_deter = deter_sq.mean()
+                deter_h = plain_deter
+
+                if (
+                    bbox_deter_weight > 0.0
+                    and obstacle_bbox is not None
+                    and hasattr(state_roll, "token_mean")
+                    and _tv is not None
+                ):
+                    bbox_h = bbox_for_model(
+                        obstacle_bbox[:, idx], _tv.image_size, _tv.image_size,
+                    )
+                    tok_mask = bbox_xyxy_to_token_mask(
+                        bbox_h,
+                        image_h=_tv.image_size,
+                        image_w=_tv.image_size,
+                        patch_size=_tv.patch_size,
+                        min_area=bbox_min_area,
+                    ).to(self._device).float()
+                    if tok_mask.shape[1] != state_roll.deter.shape[1]:
+                        tok_mask = torch.zeros(
+                            B, state_roll.deter.shape[1], device=self._device,
+                        )
+                    tok_count = tok_mask.sum()
+                    bbox_token_count_sum = bbox_token_count_sum + tok_count.detach()
+                    if tok_count > 0:
+                        bbox_deter = (
+                            deter_sq.mean(dim=-1) * tok_mask
+                        ).sum() / tok_count
+                        deter_h = plain_deter + bbox_deter_weight * bbox_deter
+                        bbox_deter_sum = bbox_deter_sum + bbox_deter.detach()
+                        bbox_deter_count += 1
+                deter_sum = deter_sum + deter_h
 
                 if h in decode_horizons:
                     # Decoder parameters are frozen, but this forward must keep
@@ -987,13 +1103,51 @@ class DeepAIFAgent:
                     )
                     recon_h = wm.decode_obs(decode_state)
                     target_img = wm.preprocess_image(images[:, idx].to(self._device))
-                    pix_sum = pix_sum + (recon_h - target_img).pow(2).mean()
+                    pix_err = (recon_h - target_img).pow(2)
+                    plain_mse = pix_err.mean()
+                    pix_h = plain_mse
+                    plain_pix_sum = plain_pix_sum + plain_mse.detach()
+                    if bbox_pix_weight > 0.0 and obstacle_bbox is not None:
+                        _, _, img_h, img_w = pix_err.shape
+                        bbox_h = bbox_for_model(obstacle_bbox[:, idx], img_h, img_w)
+                        mask_h, valid_h = bbox_xyxy_to_mask(
+                            bbox_h,
+                            image_h=img_h,
+                            image_w=img_w,
+                            dilate=bbox_mask_dilate,
+                            min_area=bbox_min_area,
+                        )
+                        mask_h = mask_h.to(self._device)
+                        valid_h = valid_h.to(self._device)
+                        bbox_total_count += B
+                        bbox_valid_count += int(valid_h.sum().item())
+                        denom = mask_h.sum() * pix_err.shape[1]
+                        if denom > 0:
+                            bbox_mse = (pix_err * mask_h).sum() / denom
+                            bbox_pix_sum = bbox_pix_sum + bbox_mse.detach()
+                            bbox_pix_count += 1
+                            if bbox_weight_mode == "weighted_mean":
+                                weights = 1.0 + bbox_pix_weight * mask_h
+                                pix_h = (pix_err * weights).sum() / (
+                                    weights.sum() * pix_err.shape[1]
+                                )
+                            else:
+                                pix_h = plain_mse + bbox_pix_weight * bbox_mse
+                    pix_sum = pix_sum + pix_h
                     n_pix += 1
 
             kl_raw_mean = kl_raw_sum / horizon_eff
             kl_clamped_mean = kl_clamped_sum / horizon_eff
             deter_loss = deter_sum / horizon_eff
             rollout_pix_mse = pix_sum / max(1, n_pix)
+            rollout_plain_pix_mse = plain_pix_sum / max(1, n_pix)
+            rollout_bbox_mse = bbox_pix_sum / max(1, bbox_pix_count)
+            bbox_valid_frac = torch.tensor(
+                (bbox_valid_count / bbox_total_count) if bbox_total_count > 0 else 0.0,
+                device=self._device,
+            )
+            bbox_deter_loss = bbox_deter_sum / max(1, bbox_deter_count)
+            bbox_token_count = bbox_token_count_sum / max(1, horizon_eff)
             use_raw_kl = bool(getattr(cfg, "transition_use_raw_kl_loss", True))
             kl_train = kl_raw_mean if use_raw_kl else kl_clamped_mean
 
@@ -1129,6 +1283,11 @@ class DeepAIFAgent:
             "online_img_loss": online_img_loss,
             "target_future_img_loss": target_future_img_loss,
             "online_future_img_loss": online_future_img_loss,
+            "rollout_bbox_mse": rollout_bbox_mse,
+            "rollout_plain_pix_mse": rollout_plain_pix_mse,
+            "bbox_valid_frac": bbox_valid_frac,
+            "bbox_deter_loss": bbox_deter_loss,
+            "bbox_token_count": bbox_token_count,
             "kl_rep": zero,
             "obs_aux_loss": zero,
             "cycle": zero,
@@ -1142,9 +1301,12 @@ class DeepAIFAgent:
         images: Tensor,
         states: Tensor,
         actions: Tensor,
+        obstacle_bbox: Tensor | None = None,
     ) -> dict[str, float]:
         self._optimizer.zero_grad()
-        loss, info_t = self._target_rollout_forward(images, states, actions)
+        loss, info_t = self._target_rollout_forward(
+            images, states, actions, obstacle_bbox=obstacle_bbox,
+        )
 
         if torch.isnan(loss) or torch.isinf(loss):
             return {k: float(v.detach().item()) for k, v in info_t.items()} | {
@@ -1172,8 +1334,11 @@ class DeepAIFAgent:
         images: Tensor,
         states: Tensor,
         actions: Tensor,
+        obstacle_bbox: Tensor | None = None,
     ) -> dict[str, float]:
-        loss, info_t = self._target_rollout_forward(images, states, actions)
+        loss, info_t = self._target_rollout_forward(
+            images, states, actions, obstacle_bbox=obstacle_bbox,
+        )
         return {k: float(v.detach().item()) for k, v in info_t.items()} | {
             "total_loss": float(loss.detach().item())
         }
