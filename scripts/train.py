@@ -882,7 +882,7 @@ def main():
              "from, used in --stage transition.",
     )
     parser.add_argument(
-        "--ae_kl_rep", type=float, default=0.01,
+        "--ae_kl_rep", type=float, default=None,
         help="Stage-ae weak posterior KL toward N(0,1); 0 = pure AE.",
     )
     parser.add_argument(
@@ -915,7 +915,9 @@ def main():
     # Two-stage training settings (must be set before agent construction so the
     # stage-aware optimizer / freeze logic in DeepAIFAgent.__init__ applies).
     cfg.training.stage = args.stage
-    cfg.training.ae_kl_rep = args.ae_kl_rep
+    if args.ae_kl_rep is not None:
+        cfg.training.ae_kl_rep = args.ae_kl_rep
+    print(f"AE KL rep: {cfg.training.ae_kl_rep}")
 
     # Cap CPU thread usage to avoid over-subscription on shared machines.
     if args.num_workers > 0:
