@@ -78,6 +78,7 @@ class TrainingConfig:
     bbox_coord_space: str = "raw"  # "raw" dataset coords | "model" preprocessed coords
     stage: str = "joint"        # "joint" | "ae" | "transition" — two-stage training
     ae_kl_rep: float = 0.01     # stage-ae weak posterior KL toward N(0,1); 0=pure AE
+    ae_train_rssm: bool = True  # stage-ae also trains RSSM/TokenViT latent path
 
 
 @dataclass

@@ -13,11 +13,34 @@ from active_inference.agent import DeepAIFAgent
 from active_inference.data.dataset import get_dataloader, get_preference_dataloader
 from active_inference.data.synthetic import SyntheticDrivingData
 from active_inference.training.losses import compute_vfe
-from active_inference.training.diag_grid import make_diag_grid
+from active_inference.training.diag_grid import make_diag_grid, make_multi_diag_grid
+from active_inference.utils.bbox import bbox_xyxy_to_model_space
 from active_inference.utils.seed import set_seed
 
 
-def _select_diag_window(h5_path: str, seq_len: int, start_idx: int | None):
+def _valid_model_bbox_np(bbox, cfg: Config) -> bool:
+    if bbox is None:
+        return False
+    image_size = int(getattr(cfg.encoder, "image_size", 64))
+    model_bbox = bbox_xyxy_to_model_space(
+        torch.as_tensor(bbox, dtype=torch.float32),
+        image_h=image_size,
+        image_w=image_size,
+        crop_road=bool(getattr(cfg.encoder, "crop_road", False)),
+        keep_bottom_frac=float(getattr(cfg.encoder, "keep_bottom_frac", 0.6)),
+        coord_space=getattr(cfg.training, "bbox_coord_space", "raw"),
+        min_area=float(getattr(cfg.training, "bbox_min_area", 1.0)),
+    )
+    return bool(torch.isfinite(model_bbox).all())
+
+
+def _select_diag_window(
+    h5_path: str,
+    seq_len: int,
+    start_idx: int | None,
+    cfg: Config | None = None,
+    obstacle_future_offsets: list[int] | None = None,
+):
     """Pick a fixed (images, states, actions, window_start_idx) for diagnostics.
 
     Chooses a contiguous same-episode window of length seq_len.  When start_idx
@@ -35,8 +58,39 @@ def _select_diag_window(h5_path: str, seq_len: int, start_idx: int | None):
         )
         n = len(episode_ids)
 
-        # Determine the anchor frame
-        if start_idx is None and obs_vis is not None and obs_vis.any():
+        bbox_data = f["obstacle_bbox"][:] if "obstacle_bbox" in f else None
+
+        # Determine the anchor frame. When requested, prefer a rollout context
+        # whose future decode horizons contain valid model-space obstacle boxes.
+        if (
+            start_idx is None
+            and cfg is not None
+            and obstacle_future_offsets
+            and bbox_data is not None
+        ):
+            candidates_all = []
+            candidates_any = []
+            for cand in range(n):
+                ep = episode_ids[cand]
+                ok = []
+                for off in obstacle_future_offsets:
+                    idx = cand + int(off)
+                    same_ep = idx < n and episode_ids[idx] == ep
+                    ok.append(
+                        same_ep and _valid_model_bbox_np(bbox_data[idx], cfg)
+                    )
+                if ok and all(ok):
+                    candidates_all.append(cand)
+                if ok and any(ok):
+                    candidates_any.append(cand)
+            candidates = candidates_all or candidates_any
+            if candidates:
+                anchor = int(candidates[len(candidates) // 2])
+            elif obs_vis is not None and obs_vis.any():
+                anchor = int(np.where(obs_vis)[0][len(np.where(obs_vis)[0]) // 2])
+            else:
+                anchor = n // 2
+        elif start_idx is None and obs_vis is not None and obs_vis.any():
             anchor = int(np.where(obs_vis)[0][len(np.where(obs_vis)[0]) // 2])
         elif start_idx is not None:
             anchor = int(start_idx)
@@ -61,6 +115,102 @@ def _select_diag_window(h5_path: str, seq_len: int, start_idx: int | None):
     local_start = max(0, anchor - win_start)
     local_start = min(local_start, (win_end - win_start) - 2)
     return images, states, actions, local_start
+
+
+def _select_diag_windows(
+    h5_path: str,
+    seq_len: int,
+    start_idx: int | None,
+    num_samples: int,
+    cfg: Config | None = None,
+    obstacle_future_offsets: list[int] | None = None,
+):
+    if num_samples <= 1:
+        one = _select_diag_window(
+            h5_path, seq_len, start_idx,
+            cfg=cfg,
+            obstacle_future_offsets=obstacle_future_offsets,
+        )
+        return [one] if one is not None else []
+
+    import h5py
+    import numpy as np
+
+    with h5py.File(h5_path, "r") as f:
+        episode_ids = f["episode_ids"][:]
+        bbox_data = f["obstacle_bbox"][:] if "obstacle_bbox" in f else None
+        n = len(episode_ids)
+
+        def can_build(anchor: int) -> bool:
+            if anchor < 0 or anchor >= n:
+                return False
+            ep = episode_ids[anchor]
+            ep_idxs = np.where(episode_ids == ep)[0]
+            ep_start, ep_end = int(ep_idxs[0]), int(ep_idxs[-1])
+            win_start = max(ep_start, min(anchor - seq_len // 3, ep_end - seq_len + 1))
+            win_start = max(ep_start, win_start)
+            win_end = min(win_start + seq_len, ep_end + 1)
+            return (win_end - win_start) >= 2
+
+        def obstacle_ok(anchor: int) -> bool:
+            if cfg is None or not obstacle_future_offsets or bbox_data is None:
+                return False
+            ep = episode_ids[anchor]
+            for off in obstacle_future_offsets:
+                idx = anchor + int(off)
+                if idx < n and episode_ids[idx] == ep and _valid_model_bbox_np(bbox_data[idx], cfg):
+                    return True
+            return False
+
+        if start_idx is not None:
+            anchors = [int(start_idx)]
+        else:
+            obstacle_candidates = [
+                i for i in range(n) if can_build(i) and obstacle_ok(i)
+            ]
+            normal_candidates = [i for i in range(n) if can_build(i)]
+
+            def spread(candidates, need: int) -> list[int]:
+                if need <= 0 or not candidates:
+                    return []
+                if len(candidates) <= need:
+                    return candidates
+                pos = np.linspace(0, len(candidates) - 1, need).round().astype(int)
+                return [candidates[p] for p in pos]
+
+            anchors = []
+            anchors.extend(spread(obstacle_candidates, num_samples))
+            seen = set(anchors)
+            anchors.extend(
+                x for x in spread(normal_candidates, num_samples * 2)
+                if x not in seen
+            )
+            anchors = anchors[:num_samples]
+
+        windows = []
+        seen_starts = set()
+        for anchor in anchors:
+            ep = episode_ids[anchor]
+            ep_idxs = np.where(episode_ids == ep)[0]
+            ep_start, ep_end = int(ep_idxs[0]), int(ep_idxs[-1])
+            win_start = max(ep_start, min(anchor - seq_len // 3, ep_end - seq_len + 1))
+            win_start = max(ep_start, win_start)
+            win_end = min(win_start + seq_len, ep_end + 1)
+            if win_end - win_start < 2:
+                continue
+            key = (int(win_start), int(win_end))
+            if key in seen_starts and len(seen_starts) < len(anchors):
+                continue
+            seen_starts.add(key)
+            images = torch.from_numpy(f["images"][win_start:win_end]).float()
+            states = torch.from_numpy(f["states"][win_start:win_end]).float()
+            actions = torch.from_numpy(f["actions"][win_start:win_end]).float()
+            local_start = max(0, anchor - win_start)
+            local_start = min(local_start, (win_end - win_start) - 2)
+            windows.append((images, states, actions, local_start))
+            if len(windows) >= num_samples:
+                break
+    return windows
 
 
 def _unpack_batch(batch):
@@ -340,6 +490,23 @@ def evaluate_world_model(
             "bbox_valid_frac": 0.0,
             "bbox_deter_loss": 0.0,
             "bbox_token_count": 0.0,
+            "obstacle_valid_count": 0.0,
+            "obstacle_valid_frac": 0.0,
+            "rollout_bbox_mse_valid_only": 0.0,
+            "rollout_plain_pix_mse_valid_only": 0.0,
+            "bbox_deter_loss_valid_only": 0.0,
+            "bbox_token_count_valid_only": 0.0,
+            "bbox_valid_count_raw": 0.0,
+            "bbox_total_count_raw": 0.0,
+            "bbox_valid_frac_raw": 0.0,
+            "gt_future_var": 0.0,
+            "target_recon_future_var": 0.0,
+            "online_recon_future_var": 0.0,
+            "rollout_future_var": 0.0,
+            "rollout_var_ratio": 0.0,
+            "action_sensitivity_left_right_mse": 0.0,
+            "action_sensitivity_gt_left_mse": 0.0,
+            "action_sensitivity_gt_right_mse": 0.0,
             "lambda_pix_eff": 0.0,
         }
         n_batches = 0
@@ -355,7 +522,23 @@ def evaluate_world_model(
             wm.train()
         if n_batches == 0:
             return {k: float("nan") for k in totals}
-        return {k: v / n_batches for k, v in totals.items()}
+        count_keys = {
+            "obstacle_valid_count",
+            "bbox_valid_count_raw",
+            "bbox_total_count_raw",
+        }
+        out = {
+            k: (v if k in count_keys else v / n_batches)
+            for k, v in totals.items()
+        }
+        total = out.get("bbox_total_count_raw", 0.0)
+        out["bbox_valid_frac_raw"] = (
+            out.get("bbox_valid_count_raw", 0.0) / total if total > 0 else 0.0
+        )
+        out["obstacle_valid_frac"] = (
+            out.get("obstacle_valid_count", 0.0) / total if total > 0 else 0.0
+        )
+        return out
 
     wm = agent.world_model
     device = agent._device
@@ -670,6 +853,21 @@ def main():
         help="Comma-separated horizons for the diagnostic grid columns.",
     )
     parser.add_argument(
+        "--diag_num_samples",
+        type=int,
+        default=1,
+        help="Number of diagnostic rollout windows to render in one grid.",
+    )
+    parser.add_argument(
+        "--diag_obstacle_visible",
+        action="store_true",
+        default=False,
+        help=(
+            "Prefer a diagnostic rollout window where context+h has a valid "
+            "model-space obstacle bbox for the diagnostic horizons."
+        ),
+    )
+    parser.add_argument(
         "--num_workers", type=int, default=10,
         help="DataLoader CPU worker  (also caps torch intra-op threads)",
     )
@@ -706,6 +904,8 @@ def main():
         raise ValueError("--early_stop_patience must be >= 0")
     if args.early_stop_min_delta < 0:
         raise ValueError("--early_stop_min_delta must be >= 0")
+    if args.diag_num_samples < 1:
+        raise ValueError("--diag_num_samples must be >= 1")
 
     cfg = Config.from_yaml(args.config, overrides=args.set or None)
     if args.epochs:
@@ -815,20 +1015,30 @@ def main():
 
     # Fixed diagnostic window (selected once so successive grids are comparable)
     diag_window = None
+    diag_windows = []
     diag_dir = output_dir / "diag"
     diag_context_len, diag_horizons = _diagnostic_settings(args, cfg)
     if args.diag_grid:
         diag_source = args.valid_data if args.valid_data is not None else data_path
         try:
-            diag_window = _select_diag_window(
-                diag_source, cfg.training.seq_len, args.diag_start_idx,
+            diag_windows = _select_diag_windows(
+                diag_source,
+                cfg.training.seq_len,
+                args.diag_start_idx,
+                args.diag_num_samples,
+                cfg=cfg if args.diag_obstacle_visible else None,
+                obstacle_future_offsets=diag_horizons
+                if args.diag_obstacle_visible else None,
             )
+            diag_window = diag_windows[0] if diag_windows else None
             if diag_window is not None:
                 print(f"Diagnostic grid enabled: source={diag_source} "
                       f"window_len={diag_window[0].shape[0]} "
                       f"local_start={diag_window[3]} "
+                      f"diag_num_samples={len(diag_windows)} "
                       f"diag_context_len={diag_context_len} "
-                      f"diag_horizons={diag_horizons}")
+                      f"diag_horizons={diag_horizons} "
+                      f"diag_obstacle_visible={args.diag_obstacle_visible}")
         except Exception as e:
             print(f"WARNING: diag window selection failed ({e}); disabling diag grid")
             diag_window = None
@@ -935,6 +1145,7 @@ def main():
                     f"bbox_deter={info.get('bbox_deter_loss', 0.0):.4f} "
                     f"bbox_valid={info.get('bbox_valid_frac', 0.0):.3f} "
                     f"bbox_tok={info.get('bbox_token_count', 0.0):.1f} "
+                    f"obs_valid={info.get('obstacle_valid_frac', 0.0):.3f} "
                     f"pix_w={info.get('lambda_pix_eff', 0.0):.3f} "
                     f"anchor={info.get('posterior_anchor_loss', 0.0):.4f} "
                     f"rr={info.get('rollout_recon', 0.0):.4f} "
@@ -978,6 +1189,19 @@ def main():
                 f"bbox_deter={val_info.get('bbox_deter_loss', 0.0):.4f} "
                 f"bbox_valid={val_info.get('bbox_valid_frac', 0.0):.3f} "
                 f"bbox_tok={val_info.get('bbox_token_count', 0.0):.1f} "
+                f"obs_count={val_info.get('obstacle_valid_count', 0.0):.1f} "
+                f"obs_frac={val_info.get('obstacle_valid_frac', 0.0):.3f} "
+                f"bbox_count={val_info.get('bbox_valid_count_raw', 0.0):.0f}/"
+                f"{val_info.get('bbox_total_count_raw', 0.0):.0f} "
+                f"bbox_frac_raw={val_info.get('bbox_valid_frac_raw', 0.0):.3f} "
+                f"bbox_pix_valid={val_info.get('rollout_bbox_mse_valid_only', 0.0):.4f} "
+                f"plain_pix_valid={val_info.get('rollout_plain_pix_mse_valid_only', 0.0):.4f} "
+                f"bbox_deter_valid={val_info.get('bbox_deter_loss_valid_only', 0.0):.4f} "
+                f"bbox_tok_valid={val_info.get('bbox_token_count_valid_only', 0.0):.1f} "
+                f"var_gt={val_info.get('gt_future_var', 0.0):.4f} "
+                f"var_roll={val_info.get('rollout_future_var', 0.0):.4f} "
+                f"var_ratio={val_info.get('rollout_var_ratio', 0.0):.3f} "
+                f"act_lr={val_info.get('action_sensitivity_left_right_mse', 0.0):.4f} "
                 f"pix_w={val_info.get('lambda_pix_eff', 0.0):.3f} "
                 f"anchor={val_info.get('posterior_anchor_loss', 0.0):.4f} "
                 f"target_img={val_info.get('target_img_loss', 0.0):.4f} "
@@ -1029,20 +1253,35 @@ def main():
             print(f"  New best checkpoint saved: epoch={best_epoch}, loss={best_loss:.6f}")
 
             # Diagnostic rollout grid (best.pt improved this epoch)
-            if diag_window is not None:
-                d_imgs, d_states, d_actions, d_start = diag_window
+            if diag_windows:
                 try:
-                    ok = make_diag_grid(
-                        agent.world_model,
-                        d_imgs, d_states, d_actions,
-                        start_idx=d_start,
-                        output_path=str(diag_dir / f"diag_epoch{best_epoch}_best.png"),
-                        horizons=diag_horizons,
-                        context_len=diag_context_len,
-                        device=agent._device,
-                        title=f"epoch {best_epoch}  val={last_val_loss}"
-                              if last_val_loss is not None else f"epoch {best_epoch}",
+                    output_path = str(diag_dir / f"diag_epoch{best_epoch}_best.png")
+                    title = (
+                        f"epoch {best_epoch}  val={last_val_loss}"
+                        if last_val_loss is not None else f"epoch {best_epoch}"
                     )
+                    if len(diag_windows) > 1:
+                        ok = make_multi_diag_grid(
+                            agent.world_model,
+                            diag_windows,
+                            output_path=output_path,
+                            horizons=diag_horizons,
+                            context_len=diag_context_len,
+                            device=agent._device,
+                            title=title,
+                        )
+                    else:
+                        d_imgs, d_states, d_actions, d_start = diag_windows[0]
+                        ok = make_diag_grid(
+                            agent.world_model,
+                            d_imgs, d_states, d_actions,
+                            start_idx=d_start,
+                            output_path=output_path,
+                            horizons=diag_horizons,
+                            context_len=diag_context_len,
+                            device=agent._device,
+                            title=title,
+                        )
                     if ok:
                         print(f"  Diagnostic grid -> "
                               f"{diag_dir / f'diag_epoch{best_epoch}_best.png'}")
@@ -1060,20 +1299,35 @@ def main():
 
         # Diagnostic rollout grid every epoch so transition drift is visible even
         # when clamped losses hide raw rollout quality.
-        if diag_window is not None:
-            d_imgs, d_states, d_actions, d_start = diag_window
+        if diag_windows:
             try:
-                ok = make_diag_grid(
-                    agent.world_model,
-                    d_imgs, d_states, d_actions,
-                    start_idx=d_start,
-                    output_path=str(diag_dir / f"diag_epoch{epoch + 1}.png"),
-                    horizons=diag_horizons,
-                    context_len=diag_context_len,
-                    device=agent._device,
-                    title=f"epoch {epoch + 1}  val={last_val_loss}"
-                          if last_val_loss is not None else f"epoch {epoch + 1}",
+                output_path = str(diag_dir / f"diag_epoch{epoch + 1}.png")
+                title = (
+                    f"epoch {epoch + 1}  val={last_val_loss}"
+                    if last_val_loss is not None else f"epoch {epoch + 1}"
                 )
+                if len(diag_windows) > 1:
+                    ok = make_multi_diag_grid(
+                        agent.world_model,
+                        diag_windows,
+                        output_path=output_path,
+                        horizons=diag_horizons,
+                        context_len=diag_context_len,
+                        device=agent._device,
+                        title=title,
+                    )
+                else:
+                    d_imgs, d_states, d_actions, d_start = diag_windows[0]
+                    ok = make_diag_grid(
+                        agent.world_model,
+                        d_imgs, d_states, d_actions,
+                        start_idx=d_start,
+                        output_path=output_path,
+                        horizons=diag_horizons,
+                        context_len=diag_context_len,
+                        device=agent._device,
+                        title=title,
+                    )
                 if ok:
                     print(f"  Diagnostic grid -> {diag_dir / f'diag_epoch{epoch + 1}.png'}")
             except Exception as e:

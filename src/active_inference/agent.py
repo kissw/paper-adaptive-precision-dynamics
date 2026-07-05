@@ -190,12 +190,16 @@ class DeepAIFAgent:
             )
         elif self._stage == "ae":
             wm = self.world_model
-            ae_params = (
-                list(wm.encoder.parameters())
-                + list(wm.obs_decoder.parameters())
-                + list(wm.state_decoder.parameters())
-            )
+            ae_train_rssm = bool(getattr(cfg.training, "ae_train_rssm", True))
+            ae_params = list(wm.encoder.parameters())
+            if ae_train_rssm:
+                ae_params += list(wm.rssm.parameters())
+            ae_params += list(wm.obs_decoder.parameters()) + list(wm.state_decoder.parameters())
             self._optimizer = torch.optim.Adam(ae_params, lr=cfg.training.lr)
+            if ae_train_rssm:
+                print("AE optimizer: encoder + rssm + decoders")
+            else:
+                print("AE optimizer: encoder + decoders only")
         else:  # joint — original behaviour
             self._optimizer = torch.optim.Adam(
                 self.world_model.parameters(), lr=cfg.training.lr,
@@ -939,6 +943,23 @@ class DeepAIFAgent:
                 "bbox_valid_frac": zero,
                 "bbox_deter_loss": zero,
                 "bbox_token_count": zero,
+                "obstacle_valid_count": zero,
+                "obstacle_valid_frac": zero,
+                "rollout_bbox_mse_valid_only": zero,
+                "rollout_plain_pix_mse_valid_only": zero,
+                "bbox_deter_loss_valid_only": zero,
+                "bbox_token_count_valid_only": zero,
+                "bbox_valid_count_raw": zero,
+                "bbox_total_count_raw": zero,
+                "bbox_valid_frac_raw": zero,
+                "gt_future_var": zero,
+                "target_recon_future_var": zero,
+                "online_recon_future_var": zero,
+                "rollout_future_var": zero,
+                "rollout_var_ratio": zero,
+                "action_sensitivity_left_right_mse": zero,
+                "action_sensitivity_gt_left_mse": zero,
+                "action_sensitivity_gt_right_mse": zero,
                 "lambda_pix_eff": zero,
             }
         horizon_eff = min(horizon, T - 1 - context)
@@ -979,10 +1000,19 @@ class DeepAIFAgent:
         bbox_pix_count = 0
         bbox_valid_count = 0
         bbox_total_count = 0
+        obstacle_valid_count = 0
+        obstacle_total_count = 0
+        bbox_plain_valid_sum = torch.zeros((), device=self._device)
+        bbox_plain_valid_count = 0
+        bbox_deter_valid_sum = torch.zeros((), device=self._device)
+        bbox_deter_valid_count = 0
+        bbox_token_count_valid_sum = torch.zeros((), device=self._device)
         bbox_deter_sum = torch.zeros((), device=self._device)
         bbox_deter_count = 0
         bbox_token_count_sum = torch.zeros((), device=self._device)
         n_pix = 0
+        gt_future_imgs = []
+        rollout_future_imgs = []
         bbox_pix_weight = float(getattr(cfg, "bbox_pix_weight", 0.0))
         bbox_deter_weight = float(getattr(cfg, "bbox_deter_weight", 0.0))
         bbox_mask_dilate = int(getattr(cfg, "bbox_mask_dilate", 0))
@@ -1064,8 +1094,7 @@ class DeepAIFAgent:
                 deter_h = plain_deter
 
                 if (
-                    bbox_deter_weight > 0.0
-                    and obstacle_bbox is not None
+                    obstacle_bbox is not None
                     and hasattr(state_roll, "token_mean")
                     and _tv is not None
                 ):
@@ -1089,9 +1118,18 @@ class DeepAIFAgent:
                         bbox_deter = (
                             deter_sq.mean(dim=-1) * tok_mask
                         ).sum() / tok_count
-                        deter_h = plain_deter + bbox_deter_weight * bbox_deter
+                        if bbox_deter_weight > 0.0:
+                            deter_h = plain_deter + bbox_deter_weight * bbox_deter
                         bbox_deter_sum = bbox_deter_sum + bbox_deter.detach()
                         bbox_deter_count += 1
+                        if h in decode_horizons:
+                            bbox_deter_valid_sum = (
+                                bbox_deter_valid_sum + bbox_deter.detach()
+                            )
+                            bbox_deter_valid_count += 1
+                            bbox_token_count_valid_sum = (
+                                bbox_token_count_valid_sum + tok_count.detach()
+                            )
                 deter_sum = deter_sum + deter_h
 
                 if h in decode_horizons:
@@ -1103,11 +1141,13 @@ class DeepAIFAgent:
                     )
                     recon_h = wm.decode_obs(decode_state)
                     target_img = wm.preprocess_image(images[:, idx].to(self._device))
+                    gt_future_imgs.append(target_img.detach())
+                    rollout_future_imgs.append(recon_h.detach())
                     pix_err = (recon_h - target_img).pow(2)
                     plain_mse = pix_err.mean()
                     pix_h = plain_mse
                     plain_pix_sum = plain_pix_sum + plain_mse.detach()
-                    if bbox_pix_weight > 0.0 and obstacle_bbox is not None:
+                    if obstacle_bbox is not None:
                         _, _, img_h, img_w = pix_err.shape
                         bbox_h = bbox_for_model(obstacle_bbox[:, idx], img_h, img_w)
                         mask_h, valid_h = bbox_xyxy_to_mask(
@@ -1121,17 +1161,25 @@ class DeepAIFAgent:
                         valid_h = valid_h.to(self._device)
                         bbox_total_count += B
                         bbox_valid_count += int(valid_h.sum().item())
+                        obstacle_total_count += B
+                        obstacle_valid_count += int(valid_h.sum().item())
+                        if valid_h.any():
+                            bbox_plain_valid_sum = (
+                                bbox_plain_valid_sum
+                                + pix_err.mean(dim=(1, 2, 3))[valid_h].sum().detach()
+                            )
+                            bbox_plain_valid_count += int(valid_h.sum().item())
                         denom = mask_h.sum() * pix_err.shape[1]
                         if denom > 0:
                             bbox_mse = (pix_err * mask_h).sum() / denom
                             bbox_pix_sum = bbox_pix_sum + bbox_mse.detach()
                             bbox_pix_count += 1
-                            if bbox_weight_mode == "weighted_mean":
+                            if bbox_pix_weight > 0.0 and bbox_weight_mode == "weighted_mean":
                                 weights = 1.0 + bbox_pix_weight * mask_h
                                 pix_h = (pix_err * weights).sum() / (
                                     weights.sum() * pix_err.shape[1]
                                 )
-                            else:
+                            elif bbox_pix_weight > 0.0:
                                 pix_h = plain_mse + bbox_pix_weight * bbox_mse
                     pix_sum = pix_sum + pix_h
                     n_pix += 1
@@ -1146,8 +1194,33 @@ class DeepAIFAgent:
                 (bbox_valid_count / bbox_total_count) if bbox_total_count > 0 else 0.0,
                 device=self._device,
             )
+            bbox_valid_count_raw = torch.tensor(
+                float(bbox_valid_count), device=self._device,
+            )
+            bbox_total_count_raw = torch.tensor(
+                float(bbox_total_count), device=self._device,
+            )
+            bbox_valid_frac_raw = bbox_valid_frac
             bbox_deter_loss = bbox_deter_sum / max(1, bbox_deter_count)
             bbox_token_count = bbox_token_count_sum / max(1, horizon_eff)
+            obstacle_valid_count_t = torch.tensor(
+                float(obstacle_valid_count), device=self._device,
+            )
+            obstacle_valid_frac = torch.tensor(
+                (obstacle_valid_count / obstacle_total_count)
+                if obstacle_total_count > 0 else 0.0,
+                device=self._device,
+            )
+            rollout_bbox_mse_valid_only = bbox_pix_sum / max(1, bbox_pix_count)
+            rollout_plain_pix_mse_valid_only = (
+                bbox_plain_valid_sum / max(1, bbox_plain_valid_count)
+            )
+            bbox_deter_loss_valid_only = (
+                bbox_deter_valid_sum / max(1, bbox_deter_valid_count)
+            )
+            bbox_token_count_valid_only = (
+                bbox_token_count_valid_sum / max(1, bbox_deter_valid_count)
+            )
             use_raw_kl = bool(getattr(cfg, "transition_use_raw_kl_loss", True))
             kl_train = kl_raw_mean if use_raw_kl else kl_clamped_mean
 
@@ -1226,6 +1299,9 @@ class DeepAIFAgent:
             target_future_sum = torch.zeros((), device=self._device)
             online_future_sum = torch.zeros((), device=self._device)
             n_future = 0
+            target_future_imgs = []
+            online_future_imgs = []
+            gt_metric_imgs = []
             future_indices = {
                 context + h
                 for h in decode_horizons
@@ -1252,6 +1328,9 @@ class DeepAIFAgent:
                 online_future = wm.decode_obs(
                     self._det_state(online_future_posts[idx])
                 )
+                gt_metric_imgs.append(img_future)
+                target_future_imgs.append(target_future)
+                online_future_imgs.append(online_future)
                 target_future_sum = target_future_sum + (
                     target_future - img_future
                 ).pow(2).mean()
@@ -1261,6 +1340,52 @@ class DeepAIFAgent:
                 n_future += 1
             target_future_img_loss = target_future_sum / max(1, n_future)
             online_future_img_loss = online_future_sum / max(1, n_future)
+
+            def _stack_var(xs):
+                if not xs:
+                    return torch.zeros((), device=self._device)
+                return torch.stack(xs, dim=0).float().var(dim=1, unbiased=False).mean()
+
+            gt_future_var = _stack_var(gt_metric_imgs)
+            target_recon_future_var = _stack_var(target_future_imgs)
+            online_recon_future_var = _stack_var(online_future_imgs)
+            rollout_future_var = _stack_var(rollout_future_imgs)
+            rollout_var_ratio = rollout_future_var / (gt_future_var + 1e-8)
+
+            def _rollout_decode(action_fn):
+                outs = []
+                s = self._det_state(target_posts[context])
+                for h in range(1, horizon_eff + 1):
+                    act_h = action_fn(h).to(self._device)
+                    s = self._det_state(wm.rssm.img_step(s, act_h))
+                    if h in decode_horizons:
+                        outs.append(wm.decode_obs(s))
+                return outs
+
+            action_dim = actions.shape[-1]
+            base_action = actions[:, context].to(self._device).clone()
+            left_action = base_action.clone()
+            right_action = base_action.clone()
+            if action_dim > 0:
+                left_action[:, 0] = 0.2
+                right_action[:, 0] = -0.2
+
+            gt_action_rollout = _rollout_decode(
+                lambda h: actions[:, context + h].to(self._device)
+            )
+            left_rollout = _rollout_decode(lambda h: left_action)
+            right_rollout = _rollout_decode(lambda h: right_action)
+
+            def _seq_mse(a, b):
+                if not a or not b:
+                    return torch.zeros((), device=self._device)
+                return torch.stack(
+                    [(x - y).pow(2).mean() for x, y in zip(a, b)]
+                ).mean()
+
+            action_sensitivity_left_right_mse = _seq_mse(left_rollout, right_rollout)
+            action_sensitivity_gt_left_mse = _seq_mse(gt_action_rollout, left_rollout)
+            action_sensitivity_gt_right_mse = _seq_mse(gt_action_rollout, right_rollout)
 
             img_loss = online_img_loss
             from active_inference.utils.transforms import symlog
@@ -1288,6 +1413,23 @@ class DeepAIFAgent:
             "bbox_valid_frac": bbox_valid_frac,
             "bbox_deter_loss": bbox_deter_loss,
             "bbox_token_count": bbox_token_count,
+            "obstacle_valid_count": obstacle_valid_count_t,
+            "obstacle_valid_frac": obstacle_valid_frac,
+            "rollout_bbox_mse_valid_only": rollout_bbox_mse_valid_only,
+            "rollout_plain_pix_mse_valid_only": rollout_plain_pix_mse_valid_only,
+            "bbox_deter_loss_valid_only": bbox_deter_loss_valid_only,
+            "bbox_token_count_valid_only": bbox_token_count_valid_only,
+            "bbox_valid_count_raw": bbox_valid_count_raw,
+            "bbox_total_count_raw": bbox_total_count_raw,
+            "bbox_valid_frac_raw": bbox_valid_frac_raw,
+            "gt_future_var": gt_future_var,
+            "target_recon_future_var": target_recon_future_var,
+            "online_recon_future_var": online_recon_future_var,
+            "rollout_future_var": rollout_future_var,
+            "rollout_var_ratio": rollout_var_ratio,
+            "action_sensitivity_left_right_mse": action_sensitivity_left_right_mse,
+            "action_sensitivity_gt_left_mse": action_sensitivity_gt_left_mse,
+            "action_sensitivity_gt_right_mse": action_sensitivity_gt_right_mse,
             "kl_rep": zero,
             "obs_aux_loss": zero,
             "cycle": zero,

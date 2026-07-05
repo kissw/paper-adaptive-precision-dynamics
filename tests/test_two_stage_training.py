@@ -39,8 +39,16 @@ class TestOptimizerScoping:
         assert _ids(a.world_model.rssm) <= opt
         assert _ids(a.world_model.encoder) <= opt
 
-    def test_ae_excludes_rssm(self):
+    def test_ae_includes_rssm_by_default(self):
         a, _ = _agent(["training.stage=ae"])
+        opt = _opt_ids(a)
+        wm = a.world_model
+        encdec = _ids(wm.encoder) | _ids(wm.obs_decoder) | _ids(wm.state_decoder)
+        assert encdec <= opt
+        assert _ids(wm.rssm) <= opt
+
+    def test_ae_can_exclude_rssm_for_legacy_behavior(self):
+        a, _ = _agent(["training.stage=ae", "training.ae_train_rssm=false"])
         opt = _opt_ids(a)
         wm = a.world_model
         encdec = _ids(wm.encoder) | _ids(wm.obs_decoder) | _ids(wm.state_decoder)
@@ -67,8 +75,15 @@ class TestAEStage:
         for k in ("img_loss", "state_loss", "kl_rep", "total_loss"):
             assert k in info
 
-    def test_update_ae_does_not_train_rssm(self):
+    def test_update_ae_trains_rssm_by_default(self):
         a, cfg = _agent(["training.stage=ae"])
+        w0 = next(a.world_model.rssm.parameters()).detach().clone()
+        a.update_ae(*_batch(cfg))
+        w1 = next(a.world_model.rssm.parameters())
+        assert not torch.allclose(w0, w1)
+
+    def test_update_ae_can_leave_rssm_frozen_for_legacy_behavior(self):
+        a, cfg = _agent(["training.stage=ae", "training.ae_train_rssm=false"])
         w0 = next(a.world_model.rssm.parameters()).detach().clone()
         a.update_ae(*_batch(cfg))
         w1 = next(a.world_model.rssm.parameters())
