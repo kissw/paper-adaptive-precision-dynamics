@@ -136,6 +136,8 @@ class TestTransitionStage:
             "training.lambda_pix=1.0",
             "training.lambda_deter=1.0",
             "training.lambda_kl=1.0",
+            "training.lambda_stoch_mean=1.0",
+            "training.lambda_stoch_decode=1.0",
             "training.free_nats_transition=0.0",
         ])
         target = WorldModel(cfg).to(a._device)
@@ -153,6 +155,10 @@ class TestTransitionStage:
             "rollout_pix_mse",
             "rollout_plain_pix_mse",
             "lambda_pix_eff",
+            "stoch_mean_loss",
+            "stoch_decode_loss",
+            "lambda_stoch_mean",
+            "lambda_stoch_decode",
         ):
             assert key in info
             assert torch.isfinite(torch.tensor(info[key]))

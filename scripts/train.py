@@ -516,6 +516,10 @@ def evaluate_world_model(
             "action_sensitivity_gt_left_mse": 0.0,
             "action_sensitivity_gt_right_mse": 0.0,
             "lambda_pix_eff": 0.0,
+            "stoch_mean_loss": 0.0,
+            "stoch_decode_loss": 0.0,
+            "lambda_stoch_mean": 0.0,
+            "lambda_stoch_decode": 0.0,
         }
         n_batches = 0
         for batch in tqdm(dataloader, desc=f"Validation({mode})", leave=False):
@@ -1131,6 +1135,7 @@ def main():
                     "kl_raw": f"{info.get('kl_raw', 0.0):.2f}",
                     "kl_train": f"{info.get('kl_train', 0.0):.2f}",
                     "deter": f"{info.get('deter_loss', 0.0):.4f}",
+                    "stoch": f"{info.get('stoch_mean_loss', 0.0):.4f}",
                     "pix": f"{info.get('rollout_pix_mse', 0.0):.4f}",
                     "bbox_pix": f"{info.get('rollout_bbox_mse', 0.0):.4f}",
                     "pix_w": f"{info.get('lambda_pix_eff', 0.0):.2f}",
@@ -1148,6 +1153,8 @@ def main():
                     f"kl_clamped={info.get('kl_clamped', 0.0):.2f} "
                     f"kl_train={info.get('kl_train', 0.0):.2f} "
                     f"deter={info.get('deter_loss', 0.0):.4f} "
+                    f"stoch={info.get('stoch_mean_loss', 0.0):.4f} "
+                    f"stoch_dec={info.get('stoch_decode_loss', 0.0):.4f} "
                     f"pix={info.get('rollout_pix_mse', 0.0):.4f} "
                     f"bbox_pix={info.get('rollout_bbox_mse', 0.0):.4f} "
                     f"plain_pix={info.get('rollout_plain_pix_mse', 0.0):.4f} "
@@ -1191,6 +1198,8 @@ def main():
                 f"kl_clamped={val_info.get('kl_clamped', 0.0):.4f} "
                 f"kl_train={val_info.get('kl_train', 0.0):.4f} "
                 f"deter={val_info.get('deter_loss', 0.0):.4f} "
+                f"stoch={val_info.get('stoch_mean_loss', 0.0):.4f} "
+                f"stoch_dec={val_info.get('stoch_decode_loss', 0.0):.4f} "
                 f"kl_rep={val_info['kl_rep']:.4f} "
                 f"pix={val_info.get('rollout_pix_mse', 0.0):.4f} "
                 f"bbox_pix={val_info.get('rollout_bbox_mse', 0.0):.4f} "

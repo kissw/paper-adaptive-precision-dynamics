@@ -118,6 +118,8 @@ training:
   lambda_kl: 1.0
   lambda_pix: 25.0
   lambda_deter: 1.0
+  lambda_stoch_mean: 0.0
+  lambda_stoch_decode: 0.0
   rollout_horizon: 1
   rollout_decode_horizons: [1]
   rollout_decode_deterministic: true

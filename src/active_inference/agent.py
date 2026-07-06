@@ -967,6 +967,10 @@ class DeepAIFAgent:
                 "action_sensitivity_gt_left_mse": zero,
                 "action_sensitivity_gt_right_mse": zero,
                 "lambda_pix_eff": zero,
+                "stoch_mean_loss": zero,
+                "stoch_decode_loss": zero,
+                "lambda_stoch_mean": zero,
+                "lambda_stoch_decode": zero,
             }
         horizon_eff = min(horizon, T - 1 - context)
 
@@ -1001,6 +1005,8 @@ class DeepAIFAgent:
         kl_raw_sum = torch.zeros((), device=self._device)
         kl_clamped_sum = torch.zeros((), device=self._device)
         deter_sum = torch.zeros((), device=self._device)
+        stoch_mean_sum = torch.zeros((), device=self._device)
+        stoch_decode_sum = torch.zeros((), device=self._device)
         pix_sum = torch.zeros((), device=self._device)
         plain_pix_sum = torch.zeros((), device=self._device)
         bbox_pix_sum = torch.zeros((), device=self._device)
@@ -1049,6 +1055,8 @@ class DeepAIFAgent:
         decode_deterministic = bool(
             getattr(cfg, "rollout_decode_deterministic", True)
         )
+        lambda_stoch_mean = float(getattr(cfg, "lambda_stoch_mean", 0.0))
+        lambda_stoch_decode = float(getattr(cfg, "lambda_stoch_decode", 0.0))
 
         def bbox_for_model(bbox_h: Tensor, image_h: int, image_w: int) -> Tensor:
             return bbox_xyxy_to_model_space(
@@ -1099,6 +1107,21 @@ class DeepAIFAgent:
                 deter_sq = (state_roll.deter - target_posts[idx].deter.detach()).pow(2)
                 plain_deter = deter_sq.mean()
                 deter_h = plain_deter
+                if lambda_stoch_mean > 0.0:
+                    stoch_mean_sum = stoch_mean_sum + self._stoch_mean_alignment_loss(
+                        state_roll, target_posts[idx],
+                    )
+                if lambda_stoch_decode > 0.0:
+                    hybrid_state = self._hybrid_prior_stoch_state(
+                        target_posts[idx], state_roll,
+                    )
+                    hybrid_img = wm.decode_obs(hybrid_state)
+                    target_img_step = wm.preprocess_image(
+                        images[:, idx].to(self._device)
+                    )
+                    stoch_decode_sum = stoch_decode_sum + (
+                        hybrid_img - target_img_step
+                    ).pow(2).mean()
 
                 if (
                     obstacle_bbox is not None
@@ -1194,6 +1217,8 @@ class DeepAIFAgent:
             kl_raw_mean = kl_raw_sum / horizon_eff
             kl_clamped_mean = kl_clamped_sum / horizon_eff
             deter_loss = deter_sum / horizon_eff
+            stoch_mean_loss = stoch_mean_sum / horizon_eff
+            stoch_decode_loss = stoch_decode_sum / horizon_eff
             rollout_pix_mse = pix_sum / max(1, n_pix)
             rollout_plain_pix_mse = plain_pix_sum / max(1, n_pix)
             rollout_bbox_mse = bbox_pix_sum / max(1, bbox_pix_count)
@@ -1273,6 +1298,8 @@ class DeepAIFAgent:
                 + lambda_deter * deter_loss
                 + lambda_pix_eff * rollout_pix_mse
                 + anchor_weight * posterior_anchor_loss
+                + lambda_stoch_mean * stoch_mean_loss
+                + lambda_stoch_decode * stoch_decode_loss
             )
 
         with torch.no_grad():
@@ -1443,6 +1470,10 @@ class DeepAIFAgent:
             "overshoot_kl": zero,
             "posterior_anchor_loss": posterior_anchor_loss,
             "lambda_pix_eff": torch.tensor(lambda_pix_eff, device=self._device),
+            "stoch_mean_loss": stoch_mean_loss,
+            "stoch_decode_loss": stoch_decode_loss,
+            "lambda_stoch_mean": torch.tensor(lambda_stoch_mean, device=self._device),
+            "lambda_stoch_decode": torch.tensor(lambda_stoch_decode, device=self._device),
         }
 
     def update_transition_target_rollout(
@@ -1550,9 +1581,13 @@ class DeepAIFAgent:
         kl_raw_sum = torch.zeros((), device=self._device)
         kl_clamped_sum = torch.zeros((), device=self._device)
         deter_sum = torch.zeros((), device=self._device)
+        stoch_mean_sum = torch.zeros((), device=self._device)
+        stoch_decode_sum = torch.zeros((), device=self._device)
         pix_sum = torch.zeros((), device=self._device)
         gt_imgs = []
         rollout_imgs = []
+        lambda_stoch_mean = float(getattr(cfg, "lambda_stoch_mean", 0.0))
+        lambda_stoch_decode = float(getattr(cfg, "lambda_stoch_decode", 0.0))
         with torch.amp.autocast(
             "cuda", enabled=self._use_amp, dtype=self._amp_dtype,
         ):
@@ -1579,6 +1614,10 @@ class DeepAIFAgent:
                 deter_sum = deter_sum + (
                     prior_t.deter - target_t.deter.detach()
                 ).pow(2).mean()
+                if lambda_stoch_mean > 0.0:
+                    stoch_mean_sum = stoch_mean_sum + self._stoch_mean_alignment_loss(
+                        prior_t, target_t,
+                    )
 
                 decode_state = (
                     self._det_state(prior_t) if decode_deterministic else prior_t
@@ -1586,6 +1625,12 @@ class DeepAIFAgent:
                 recon_t = wm.decode_obs(decode_state)
                 gt_t = wm.preprocess_image(images[:, t].to(self._device))
                 pix_sum = pix_sum + (recon_t - gt_t).pow(2).mean()
+                if lambda_stoch_decode > 0.0:
+                    hybrid_state = self._hybrid_prior_stoch_state(target_t, prior_t)
+                    hybrid_img = wm.decode_obs(hybrid_state)
+                    stoch_decode_sum = stoch_decode_sum + (
+                        hybrid_img - gt_t
+                    ).pow(2).mean()
                 gt_imgs.append(gt_t.detach())
                 rollout_imgs.append(recon_t.detach())
 
@@ -1593,6 +1638,8 @@ class DeepAIFAgent:
             kl_raw_mean = kl_raw_sum / denom
             kl_clamped_mean = kl_clamped_sum / denom
             deter_loss = deter_sum / denom
+            stoch_mean_loss = stoch_mean_sum / denom
+            stoch_decode_loss = stoch_decode_sum / denom
             rollout_pix_mse = pix_sum / denom
             use_raw_kl = bool(getattr(cfg, "transition_use_raw_kl_loss", True))
             kl_train = kl_raw_mean if use_raw_kl else kl_clamped_mean
@@ -1604,6 +1651,8 @@ class DeepAIFAgent:
                 lambda_kl * kl_train
                 + lambda_deter * deter_loss
                 + lambda_pix_eff * rollout_pix_mse
+                + lambda_stoch_mean * stoch_mean_loss
+                + lambda_stoch_decode * stoch_decode_loss
             )
 
         def _seq_var(xs):
@@ -1630,6 +1679,10 @@ class DeepAIFAgent:
             "rollout_future_var": rollout_future_var,
             "rollout_var_ratio": rollout_var_ratio,
             "lambda_pix_eff": torch.tensor(lambda_pix_eff, device=self._device),
+            "stoch_mean_loss": stoch_mean_loss,
+            "stoch_decode_loss": stoch_decode_loss,
+            "lambda_stoch_mean": torch.tensor(lambda_stoch_mean, device=self._device),
+            "lambda_stoch_decode": torch.tensor(lambda_stoch_decode, device=self._device),
         })
         return loss, info
 
@@ -1676,6 +1729,10 @@ class DeepAIFAgent:
             "action_sensitivity_gt_left_mse": zero,
             "action_sensitivity_gt_right_mse": zero,
             "lambda_pix_eff": zero,
+            "stoch_mean_loss": zero,
+            "stoch_decode_loss": zero,
+            "lambda_stoch_mean": zero,
+            "lambda_stoch_decode": zero,
         }
 
     def update_transition_dense_one_step(
@@ -1718,6 +1775,30 @@ class DeepAIFAgent:
         return {k: float(v.detach().item()) for k, v in info_t.items()} | {
             "total_loss": float(loss.detach().item())
         }
+
+    def _stoch_mean_alignment_loss(self, prior, target) -> Tensor:
+        if hasattr(prior, "token_mean") and hasattr(target, "token_mean"):
+            return nn.functional.mse_loss(
+                prior.token_mean, target.token_mean.detach(),
+            )
+        return nn.functional.mse_loss(prior.mean, target.mean.detach())
+
+    def _hybrid_prior_stoch_state(self, target, prior):
+        if hasattr(prior, "token_mean"):
+            return type(prior)(
+                deter=target.deter.detach(),
+                stoch=prior.token_mean,
+                mean=prior.mean,
+                std=prior.std,
+                token_mean=prior.token_mean,
+                token_std=prior.token_std,
+            )
+        return type(prior)(
+            deter=target.deter.detach(),
+            stoch=prior.mean,
+            mean=prior.mean,
+            std=prior.std,
+        )
 
     @staticmethod
     def _det_state(post):

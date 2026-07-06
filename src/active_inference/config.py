@@ -61,6 +61,8 @@ class TrainingConfig:
     lambda_kl: float = 1.0
     lambda_pix: float = 0.0
     lambda_deter: float = 1.0
+    lambda_stoch_mean: float = 0.0
+    lambda_stoch_decode: float = 0.0
     rollout_horizon: int = 1
     rollout_decode_horizons: list[int] = field(default_factory=lambda: [1])
     rollout_decode_deterministic: bool = True
