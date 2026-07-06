@@ -48,6 +48,25 @@ def _det_state(state):
     )
 
 
+def _hybrid_state(deter_source, stoch_source):
+    """State with deter from one source and deterministic stoch from another."""
+    if hasattr(stoch_source, "token_mean"):
+        return type(stoch_source)(
+            deter=deter_source.deter,
+            stoch=stoch_source.token_mean,
+            mean=stoch_source.mean,
+            std=stoch_source.std,
+            token_mean=stoch_source.token_mean,
+            token_std=stoch_source.token_std,
+        )
+    return type(stoch_source)(
+        deter=deter_source.deter,
+        stoch=stoch_source.mean,
+        mean=stoch_source.mean,
+        std=stoch_source.std,
+    )
+
+
 def _slice_state(state, b: int):
     return type(state)(*[x[b:b + 1] for x in state])
 
@@ -161,6 +180,7 @@ def _posterior_sequence(wm, images, states, actions, device):
         act_t = actions[:, t].to(device)
         embed = wm.encoder(img_t, st_t)
         post, _ = wm.rssm.obs_step(prev, act_t, embed)
+        post = _det_state(post)
         posts.append(post)
         prev = post
     return posts
@@ -230,36 +250,36 @@ def _collect_visuals(agent: DeepAIFAgent, images, states, actions, context_idx, 
 
     rows = {
         "GT": [],
-        "target_wm posterior recon": [],
-        "online_wm posterior recon": [],
-        "target-start rollout": [],
-        "online-start rollout": [],
-        "steer +0.2 rollout from target start": [],
-        "steer -0.2 rollout from target start": [],
+        "target posterior recon": [],
+        "prior rollout": [],
+        "hybrid prior_deter + target_stoch": [],
+        "hybrid target_deter + prior_stoch": [],
     }
     gt_metric = []
     target_recon_metric = []
-    online_recon_metric = []
-    target_roll_metric = []
-    online_roll_metric = []
+    prior_roll_metric = []
+    hybrid_a_metric = []
+    hybrid_b_metric = []
     plus_metric = []
     minus_metric = []
 
     for b in range(bsz):
         for h in horizons:
             idx = context_idx + h
+            target_state = _slice_state(target_posts[idx], b)
+            prior_state = _slice_state(target_roll[h], b)
             gt = online_wm.preprocess_image(images[b:b + 1, idx]).squeeze(0)
             target_recon = target_wm.decode_obs(
-                _det_state(_slice_state(target_posts[idx], b))
+                _det_state(target_state)
             ).squeeze(0)
-            online_recon = online_wm.decode_obs(
-                _det_state(_slice_state(online_posts[idx], b))
+            prior_img = online_wm.decode_obs(
+                _det_state(prior_state)
             ).squeeze(0)
-            target_img = online_wm.decode_obs(
-                _det_state(_slice_state(target_roll[h], b))
+            hybrid_a = online_wm.decode_obs(
+                _hybrid_state(prior_state, target_state)
             ).squeeze(0)
-            online_img = online_wm.decode_obs(
-                _det_state(_slice_state(online_roll[h], b))
+            hybrid_b = online_wm.decode_obs(
+                _hybrid_state(target_state, prior_state)
             ).squeeze(0)
             plus_img = online_wm.decode_obs(
                 _det_state(_slice_state(steer_plus[h], b))
@@ -269,18 +289,16 @@ def _collect_visuals(agent: DeepAIFAgent, images, states, actions, context_idx, 
             ).squeeze(0)
 
             rows["GT"].append(gt)
-            rows["target_wm posterior recon"].append(target_recon)
-            rows["online_wm posterior recon"].append(online_recon)
-            rows["target-start rollout"].append(target_img)
-            rows["online-start rollout"].append(online_img)
-            rows["steer +0.2 rollout from target start"].append(plus_img)
-            rows["steer -0.2 rollout from target start"].append(minus_img)
+            rows["target posterior recon"].append(target_recon)
+            rows["prior rollout"].append(prior_img)
+            rows["hybrid prior_deter + target_stoch"].append(hybrid_a)
+            rows["hybrid target_deter + prior_stoch"].append(hybrid_b)
 
             gt_metric.append(gt)
             target_recon_metric.append(target_recon)
-            online_recon_metric.append(online_recon)
-            target_roll_metric.append(target_img)
-            online_roll_metric.append(online_img)
+            prior_roll_metric.append(prior_img)
+            hybrid_a_metric.append(hybrid_a)
+            hybrid_b_metric.append(hybrid_b)
             plus_metric.append(plus_img)
             minus_metric.append(minus_img)
 
@@ -289,19 +307,19 @@ def _collect_visuals(agent: DeepAIFAgent, images, states, actions, context_idx, 
 
     gt_s = stack(gt_metric)
     target_recon_s = stack(target_recon_metric)
-    online_recon_s = stack(online_recon_metric)
-    target_roll_s = stack(target_roll_metric)
-    online_roll_s = stack(online_roll_metric)
+    prior_roll_s = stack(prior_roll_metric)
+    hybrid_a_s = stack(hybrid_a_metric)
+    hybrid_b_s = stack(hybrid_b_metric)
     plus_s = stack(plus_metric)
     minus_s = stack(minus_metric)
 
     metrics = {
         "target_recon_mse": (target_recon_s - gt_s).pow(2).mean(),
-        "online_recon_mse": (online_recon_s - gt_s).pow(2).mean(),
-        "target_start_rollout_mse": (target_roll_s - gt_s).pow(2).mean(),
-        "online_start_rollout_mse": (online_roll_s - gt_s).pow(2).mean(),
-        "target_start_rollout_var": target_roll_s.var(dim=0, unbiased=False).mean(),
-        "online_start_rollout_var": online_roll_s.var(dim=0, unbiased=False).mean(),
+        "prior_rollout_mse": (prior_roll_s - gt_s).pow(2).mean(),
+        "hybrid_prior_deter_target_stoch_mse": (hybrid_a_s - gt_s).pow(2).mean(),
+        "hybrid_target_deter_prior_stoch_mse": (hybrid_b_s - gt_s).pow(2).mean(),
+        "target_start_rollout_mse": (prior_roll_s - gt_s).pow(2).mean(),
+        "target_start_rollout_var": prior_roll_s.var(dim=0, unbiased=False).mean(),
         "gt_var": gt_s.var(dim=0, unbiased=False).mean(),
         "action_sensitivity_left_right_mse": (plus_s - minus_s).pow(2).mean(),
     }
@@ -429,11 +447,9 @@ def main():
     print(f"diag_obstacle_visible: {args.diag_obstacle_visible}")
     for key in [
         "target_recon_mse",
-        "online_recon_mse",
-        "target_start_rollout_mse",
-        "online_start_rollout_mse",
-        "target_start_rollout_var",
-        "online_start_rollout_var",
+        "prior_rollout_mse",
+        "hybrid_prior_deter_target_stoch_mse",
+        "hybrid_target_deter_prior_stoch_mse",
         "gt_var",
         "action_sensitivity_left_right_mse",
     ]:

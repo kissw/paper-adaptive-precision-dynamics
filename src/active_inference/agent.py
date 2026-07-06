@@ -982,6 +982,7 @@ class DeepAIFAgent:
                     act_t = actions[:, t].to(self._device)
                     embed = target_wm.encoder(img_t, st_t)
                     post_t, _ = target_wm.rssm.obs_step(prev_t, act_t, embed)
+                    post_t = self._det_state(post_t)
                     post_t = type(post_t)(*[x.detach() for x in post_t])
                     target_posts.append(post_t)
                     prev_t = post_t
@@ -1533,6 +1534,7 @@ class DeepAIFAgent:
                     act_t = actions[:, t].to(self._device)
                     embed = target_wm.encoder(img_t, st_t)
                     post_t, _ = target_wm.rssm.obs_step(prev_t, act_t, embed)
+                    post_t = self._det_state(post_t)
                     post_t = type(post_t)(*[x.detach() for x in post_t])
                     target_posts.append(post_t)
                     prev_t = post_t
