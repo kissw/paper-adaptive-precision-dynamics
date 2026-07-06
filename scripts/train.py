@@ -395,6 +395,14 @@ def stage_selection_loss(stage: str, info: dict[str, float]) -> float:
 
     return float(info["total_loss"])
 
+
+def _uses_transition_target_model(cfg) -> bool:
+    return (
+        getattr(cfg.training, "transition_loss_mode", "")
+        in {"target_rollout", "dense_one_step"}
+        and getattr(cfg.training, "transition_use_target_model", False)
+    )
+
 def _evaluate_ae(agent: DeepAIFAgent, dataloader) -> dict[str, float]:
     """AE-stage validation: same deterministic forward as agent.update_ae.
 
@@ -459,9 +467,9 @@ def evaluate_world_model(
     cfg = agent._cfg.training
     if (
         stage == "transition"
-        and getattr(cfg, "transition_loss_mode", "") == "target_rollout"
-        and agent.target_world_model is not None
+        and getattr(cfg, "transition_loss_mode", "") in {"target_rollout", "dense_one_step"}
     ):
+        mode = getattr(cfg, "transition_loss_mode", "")
         wm = agent.world_model
         was_training = wm.training
         wm.eval()
@@ -510,11 +518,16 @@ def evaluate_world_model(
             "lambda_pix_eff": 0.0,
         }
         n_batches = 0
-        for batch in tqdm(dataloader, desc="Validation(target_rollout)", leave=False):
+        for batch in tqdm(dataloader, desc=f"Validation({mode})", leave=False):
             images, states, actions, _, obstacle_bbox = _unpack_batch(batch)
-            info = agent.evaluate_transition_target_rollout_batch(
-                images, states, actions, obstacle_bbox=obstacle_bbox,
-            )
+            if mode == "dense_one_step":
+                info = agent.evaluate_transition_dense_one_step_batch(
+                    images, states, actions,
+                )
+            else:
+                info = agent.evaluate_transition_target_rollout_batch(
+                    images, states, actions, obstacle_bbox=obstacle_bbox,
+                )
             n_batches += 1
             for k in totals:
                 totals[k] += float(info.get(k, 0.0))
@@ -967,13 +980,10 @@ def main():
         agent.load_checkpoint(args.resume)
         if args.stage == "transition":
             agent.freeze_encoder_decoder()
-            if (
-                getattr(cfg.training, "transition_loss_mode", "") == "target_rollout"
-                and getattr(cfg.training, "transition_use_target_model", False)
-            ):
+            if _uses_transition_target_model(cfg):
                 if args.init_from is None:
                     print(
-                        "WARNING: target_rollout resume without --init_from; "
+                        "WARNING: target-model transition resume without --init_from; "
                         "using the resume checkpoint as target_world_model."
                     )
                     agent.set_target_world_model_from_checkpoint(args.resume)
@@ -996,10 +1006,7 @@ def main():
             agent.load_world_model_weights(args.init_from)
             print("Loaded full world_model from AE checkpoint for transition warm-start")
             agent.freeze_encoder_decoder()  # re-assert eval()/requires_grad after load
-            if (
-                getattr(cfg.training, "transition_loss_mode", "") == "target_rollout"
-                and getattr(cfg.training, "transition_use_target_model", False)
-            ):
+            if _uses_transition_target_model(cfg):
                 agent.set_target_world_model_from_checkpoint(args.init_from)
 
     # LR schedule: warmup -> cosine decay over the full run (after any resume,

@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from active_inference.config import Config
-from active_inference.agent import DeepAIFAgent
+from active_inference.agent import DeepAIFAgent, WorldModel
 
 
 DEBUG_YAML = "configs/experiment/debug.yaml"
@@ -116,6 +116,46 @@ class TestTransitionStage:
         ])
         a.update(*_batch(cfg))
         assert all(p.grad is None for p in a.world_model.encoder.parameters())
+
+    def test_dense_one_step_requires_target_world_model(self):
+        a, cfg = _agent([
+            "training.stage=transition",
+            "training.transition_loss_mode=dense_one_step",
+            "training.transition_use_target_model=true",
+        ])
+        imgs, sts, acts = _batch(cfg)
+        import pytest
+        with pytest.raises(RuntimeError, match="dense_one_step.*target_world_model"):
+            a.update(imgs, sts, acts)
+
+    def test_dense_one_step_forward_finite_with_target(self):
+        a, cfg = _agent([
+            "training.stage=transition",
+            "training.transition_loss_mode=dense_one_step",
+            "training.transition_use_target_model=true",
+            "training.lambda_pix=1.0",
+            "training.lambda_deter=1.0",
+            "training.lambda_kl=1.0",
+            "training.free_nats_transition=0.0",
+        ])
+        target = WorldModel(cfg).to(a._device)
+        target.eval()
+        for p in target.parameters():
+            p.requires_grad = False
+        a.target_world_model = target
+        info = a.update(*_batch(cfg))
+        assert torch.isfinite(torch.tensor(info["total_loss"]))
+        for key in (
+            "kl_raw",
+            "kl_clamped",
+            "kl_train",
+            "deter_loss",
+            "rollout_pix_mse",
+            "rollout_plain_pix_mse",
+            "lambda_pix_eff",
+        ):
+            assert key in info
+            assert torch.isfinite(torch.tensor(info[key]))
 
     def test_rollout_recon_drives_transition(self):
         a, cfg = _agent([

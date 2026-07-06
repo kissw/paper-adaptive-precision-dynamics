@@ -512,14 +512,20 @@ class DeepAIFAgent:
         obstacle_bbox: Tensor | None = None,
     ) -> dict[str, float]:
         cfg = self._cfg.training
+        transition_loss_mode = getattr(cfg, "transition_loss_mode", "")
         if (
             self._stage == "transition"
-            and getattr(cfg, "transition_loss_mode", "") == "target_rollout"
+            and transition_loss_mode == "target_rollout"
             and self.target_world_model is not None
         ):
             return self.update_transition_target_rollout(
                 images, states, actions, obstacle_bbox=obstacle_bbox,
             )
+        if (
+            self._stage == "transition"
+            and transition_loss_mode == "dense_one_step"
+        ):
+            return self.update_transition_dense_one_step(images, states, actions)
 
         # Per-timestep backward with NaN guard, AMP, and CUDA error recovery
         # obstacle_labels: [B, T] binary (1=obstacle visible, 0=clear)
@@ -1481,6 +1487,232 @@ class DeepAIFAgent:
         loss, info_t = self._target_rollout_forward(
             images, states, actions, obstacle_bbox=obstacle_bbox,
         )
+        return {k: float(v.detach().item()) for k, v in info_t.items()} | {
+            "total_loss": float(loss.detach().item())
+        }
+
+    def _dense_one_step_forward(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+    ) -> tuple[Tensor, dict[str, Tensor]]:
+        """Dense teacher-forced one-step prior objective for transition stage."""
+        cfg = self._cfg.training
+        if self._stage != "transition":
+            raise RuntimeError(
+                "transition_loss_mode='dense_one_step' requires stage='transition'."
+            )
+        if not bool(getattr(cfg, "transition_use_target_model", False)):
+            raise RuntimeError(
+                "transition_loss_mode='dense_one_step' requires "
+                "training.transition_use_target_model=true."
+            )
+        if self.target_world_model is None:
+            raise RuntimeError(
+                "transition_loss_mode='dense_one_step' requires "
+                "target_world_model. Pass --init_from with an AE checkpoint."
+            )
+
+        wm = self.world_model
+        target_wm = self.target_world_model
+        B, T = images.shape[:2]
+        zero = torch.zeros((), device=self._device)
+        if T < 2:
+            return zero, self._dense_one_step_info_defaults(zero)
+
+        target_posts = []
+        prev_t = target_wm.rssm.initial(B, self._device)
+        with torch.no_grad():
+            with torch.amp.autocast(
+                "cuda", enabled=self._use_amp, dtype=self._amp_dtype,
+            ):
+                for t in range(T):
+                    img_t = target_wm.preprocess_image(images[:, t].to(self._device))
+                    st_t = states[:, t].to(self._device)
+                    act_t = actions[:, t].to(self._device)
+                    embed = target_wm.encoder(img_t, st_t)
+                    post_t, _ = target_wm.rssm.obs_step(prev_t, act_t, embed)
+                    post_t = type(post_t)(*[x.detach() for x in post_t])
+                    target_posts.append(post_t)
+                    prev_t = post_t
+
+        free_nats_cfg = getattr(cfg, "free_nats_transition", None)
+        if free_nats_cfg is None:
+            free_nats_cfg = getattr(cfg, "free_nats", 1.0)
+        free_nats = float(free_nats_cfg)
+        decode_deterministic = bool(
+            getattr(cfg, "rollout_decode_deterministic", True)
+        )
+
+        kl_raw_sum = torch.zeros((), device=self._device)
+        kl_clamped_sum = torch.zeros((), device=self._device)
+        deter_sum = torch.zeros((), device=self._device)
+        pix_sum = torch.zeros((), device=self._device)
+        gt_imgs = []
+        rollout_imgs = []
+        with torch.amp.autocast(
+            "cuda", enabled=self._use_amp, dtype=self._amp_dtype,
+        ):
+            for t in range(1, T):
+                state_prev = type(target_posts[t - 1])(
+                    *[x.detach() for x in target_posts[t - 1]]
+                )
+                target_t = target_posts[t]
+                prior_t = wm.rssm.img_step(
+                    state_prev, actions[:, t].to(self._device)
+                )
+
+                prior_mean, prior_std = wm.get_kl_stats(prior_t)
+                target_mean, target_std = target_wm.get_kl_stats(target_t)
+                kl_raw, kl_clamped = compute_transition_target_kl(
+                    prior_mean,
+                    prior_std,
+                    target_mean,
+                    target_std,
+                    free_nats=free_nats,
+                )
+                kl_raw_sum = kl_raw_sum + kl_raw
+                kl_clamped_sum = kl_clamped_sum + kl_clamped
+                deter_sum = deter_sum + (
+                    prior_t.deter - target_t.deter.detach()
+                ).pow(2).mean()
+
+                decode_state = (
+                    self._det_state(prior_t) if decode_deterministic else prior_t
+                )
+                recon_t = wm.decode_obs(decode_state)
+                gt_t = wm.preprocess_image(images[:, t].to(self._device))
+                pix_sum = pix_sum + (recon_t - gt_t).pow(2).mean()
+                gt_imgs.append(gt_t.detach())
+                rollout_imgs.append(recon_t.detach())
+
+            denom = max(1, T - 1)
+            kl_raw_mean = kl_raw_sum / denom
+            kl_clamped_mean = kl_clamped_sum / denom
+            deter_loss = deter_sum / denom
+            rollout_pix_mse = pix_sum / denom
+            use_raw_kl = bool(getattr(cfg, "transition_use_raw_kl_loss", True))
+            kl_train = kl_raw_mean if use_raw_kl else kl_clamped_mean
+
+            lambda_kl = float(getattr(cfg, "lambda_kl", 1.0))
+            lambda_deter = float(getattr(cfg, "lambda_deter", 1.0))
+            lambda_pix_eff = float(getattr(cfg, "lambda_pix", 0.0))
+            loss = (
+                lambda_kl * kl_train
+                + lambda_deter * deter_loss
+                + lambda_pix_eff * rollout_pix_mse
+            )
+
+        def _seq_var(xs):
+            if not xs:
+                return torch.zeros((), device=self._device)
+            return torch.cat(xs, dim=0).float().var(dim=0, unbiased=False).mean()
+
+        gt_future_var = _seq_var(gt_imgs)
+        rollout_future_var = _seq_var(rollout_imgs)
+        rollout_var_ratio = rollout_future_var / (gt_future_var + 1e-8)
+
+        info = self._dense_one_step_info_defaults(zero)
+        info.update({
+            "kl_raw": kl_raw_mean,
+            "kl_clamped": kl_clamped_mean,
+            "kl_dyn": kl_clamped_mean,
+            "kl_train": kl_train,
+            "deter_loss": deter_loss,
+            "rollout_pix_mse": rollout_pix_mse,
+            "rollout_recon": rollout_pix_mse,
+            "rollout_plain_pix_mse": rollout_pix_mse,
+            "img_loss": rollout_pix_mse,
+            "gt_future_var": gt_future_var,
+            "rollout_future_var": rollout_future_var,
+            "rollout_var_ratio": rollout_var_ratio,
+            "lambda_pix_eff": torch.tensor(lambda_pix_eff, device=self._device),
+        })
+        return loss, info
+
+    def _dense_one_step_info_defaults(self, zero: Tensor) -> dict[str, Tensor]:
+        return {
+            "kl_raw": zero,
+            "kl_clamped": zero,
+            "kl_dyn": zero,
+            "kl_train": zero,
+            "deter_loss": zero,
+            "rollout_pix_mse": zero,
+            "rollout_recon": zero,
+            "rollout_plain_pix_mse": zero,
+            "img_loss": zero,
+            "state_loss": zero,
+            "kl_rep": zero,
+            "obs_aux_loss": zero,
+            "cycle": zero,
+            "overshoot_kl": zero,
+            "posterior_anchor_loss": zero,
+            "target_img_loss": zero,
+            "online_img_loss": zero,
+            "target_future_img_loss": zero,
+            "online_future_img_loss": zero,
+            "rollout_bbox_mse": zero,
+            "bbox_valid_frac": zero,
+            "bbox_deter_loss": zero,
+            "bbox_token_count": zero,
+            "obstacle_valid_count": zero,
+            "obstacle_valid_frac": zero,
+            "rollout_bbox_mse_valid_only": zero,
+            "rollout_plain_pix_mse_valid_only": zero,
+            "bbox_deter_loss_valid_only": zero,
+            "bbox_token_count_valid_only": zero,
+            "bbox_valid_count_raw": zero,
+            "bbox_total_count_raw": zero,
+            "bbox_valid_frac_raw": zero,
+            "gt_future_var": zero,
+            "target_recon_future_var": zero,
+            "online_recon_future_var": zero,
+            "rollout_future_var": zero,
+            "rollout_var_ratio": zero,
+            "action_sensitivity_left_right_mse": zero,
+            "action_sensitivity_gt_left_mse": zero,
+            "action_sensitivity_gt_right_mse": zero,
+            "lambda_pix_eff": zero,
+        }
+
+    def update_transition_dense_one_step(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+    ) -> dict[str, float]:
+        self._optimizer.zero_grad()
+        loss, info_t = self._dense_one_step_forward(images, states, actions)
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            return {k: float(v.detach().item()) for k, v in info_t.items()} | {
+                "total_loss": float("nan")
+            }
+
+        if loss.requires_grad:
+            loss.backward()
+            clip_params = self._optimizer.param_groups[0]["params"]
+            nn.utils.clip_grad_norm_(clip_params, self._cfg.training.grad_clip)
+            self._optimizer.step()
+
+        sched = getattr(self, "_scheduler", None)
+        if sched is not None:
+            sched.step()
+        self._train_step += 1
+
+        return {k: float(v.detach().item()) for k, v in info_t.items()} | {
+            "total_loss": float(loss.detach().item())
+        }
+
+    @torch.no_grad()
+    def evaluate_transition_dense_one_step_batch(
+        self,
+        images: Tensor,
+        states: Tensor,
+        actions: Tensor,
+    ) -> dict[str, float]:
+        loss, info_t = self._dense_one_step_forward(images, states, actions)
         return {k: float(v.detach().item()) for k, v in info_t.items()} | {
             "total_loss": float(loss.detach().item())
         }

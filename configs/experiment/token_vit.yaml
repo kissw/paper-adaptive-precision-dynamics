@@ -113,7 +113,7 @@ training:
   obstacle_token_weight: 1.0  # ViT: upweight obstacle-overlap tokens in cycle loss (1=off)
   rollout_single_shot: false  # PAActInf-style: rollout rr/cycle once per sequence
   rollout_context_frames: 25  # P: single-shot rollout start frame
-  transition_loss_mode: "target_rollout"
+  transition_loss_mode: "target_rollout"  # "target_rollout" | "dense_one_step"
   transition_use_target_model: true
   lambda_kl: 1.0
   lambda_pix: 25.0
