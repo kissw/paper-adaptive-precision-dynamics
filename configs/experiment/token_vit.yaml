@@ -124,6 +124,14 @@ training:
   rollout_decode_horizons: [1]
   rollout_decode_deterministic: true
   rollout_pix_warmup_steps: 2000
+  target_rollout_step_decay: 1.0
+  target_rollout_future_warmup_steps: 0
+  target_rollout_detach_between_steps: false
+  h1_anchor_checkpoint: null
+  h1_anchor_weight: 0.0
+  h1_anchor_stoch_weight: 1.0
+  h1_anchor_deter_weight: 1.0
+  h1_anchor_decode_weight: 1.0
   free_nats_transition: 0.5
   transition_use_raw_kl_loss: true
   posterior_anchor_weight: 0.0

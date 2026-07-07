@@ -67,6 +67,14 @@ class TrainingConfig:
     rollout_decode_horizons: list[int] = field(default_factory=lambda: [1])
     rollout_decode_deterministic: bool = True
     rollout_pix_warmup_steps: int = 0
+    target_rollout_step_decay: float = 1.0
+    target_rollout_future_warmup_steps: int = 0
+    target_rollout_detach_between_steps: bool = False
+    h1_anchor_checkpoint: str | None = None
+    h1_anchor_weight: float = 0.0
+    h1_anchor_stoch_weight: float = 1.0
+    h1_anchor_deter_weight: float = 1.0
+    h1_anchor_decode_weight: float = 1.0
     free_nats_transition: float | None = None
     transition_use_raw_kl_loss: bool = True
     posterior_anchor_weight: float = 0.0

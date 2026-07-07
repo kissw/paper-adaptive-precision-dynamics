@@ -150,6 +150,7 @@ class DeepAIFAgent:
 
         self.world_model = WorldModel(cfg).to(self._device)
         self.target_world_model: WorldModel | None = None
+        self.h1_anchor_world_model: WorldModel | None = None
         self.preference = PreferenceModel(
             K=cfg.preference.K,
             latent_dim=cfg.rssm.stoch_dim,
@@ -971,6 +972,17 @@ class DeepAIFAgent:
                 "stoch_decode_loss": zero,
                 "lambda_stoch_mean": zero,
                 "lambda_stoch_decode": zero,
+                "target_rollout_step_decay": zero,
+                "target_rollout_future_ramp": zero,
+                "h1_weight": zero,
+                "h2_weight": zero,
+                "total_horizon_weight": zero,
+                "total_pixel_weight": zero,
+                "target_rollout_detach_between_steps": zero,
+                "h1_anchor_loss": zero,
+                "h1_anchor_stoch_loss": zero,
+                "h1_anchor_deter_loss": zero,
+                "h1_anchor_decode_loss": zero,
             }
         horizon_eff = min(horizon, T - 1 - context)
 
@@ -1007,9 +1019,14 @@ class DeepAIFAgent:
         deter_sum = torch.zeros((), device=self._device)
         stoch_mean_sum = torch.zeros((), device=self._device)
         stoch_decode_sum = torch.zeros((), device=self._device)
+        total_h_weight = torch.zeros((), device=self._device)
+        total_pix_weight = torch.zeros((), device=self._device)
+        total_bbox_pix_weight = torch.zeros((), device=self._device)
+        total_bbox_deter_weight = torch.zeros((), device=self._device)
         pix_sum = torch.zeros((), device=self._device)
         plain_pix_sum = torch.zeros((), device=self._device)
         bbox_pix_sum = torch.zeros((), device=self._device)
+        per_horizon_info: dict[str, Tensor] = {}
         bbox_pix_count = 0
         bbox_valid_count = 0
         bbox_total_count = 0
@@ -1057,6 +1074,30 @@ class DeepAIFAgent:
         )
         lambda_stoch_mean = float(getattr(cfg, "lambda_stoch_mean", 0.0))
         lambda_stoch_decode = float(getattr(cfg, "lambda_stoch_decode", 0.0))
+        step_decay = float(getattr(cfg, "target_rollout_step_decay", 1.0))
+        future_warmup = int(getattr(cfg, "target_rollout_future_warmup_steps", 0))
+        detach_between_steps = bool(
+            getattr(cfg, "target_rollout_detach_between_steps", False)
+        )
+        h1_anchor_weight = float(getattr(cfg, "h1_anchor_weight", 0.0))
+        h1_anchor_stoch_weight = float(getattr(cfg, "h1_anchor_stoch_weight", 1.0))
+        h1_anchor_deter_weight = float(getattr(cfg, "h1_anchor_deter_weight", 1.0))
+        h1_anchor_decode_weight = float(getattr(cfg, "h1_anchor_decode_weight", 1.0))
+        if h1_anchor_weight > 0.0 and self.h1_anchor_world_model is None:
+            raise RuntimeError(
+                "training.h1_anchor_weight > 0 requires h1_anchor_world_model. "
+                "Set training.h1_anchor_checkpoint to an H1 checkpoint."
+            )
+        if future_warmup > 0:
+            future_ramp = min(1.0, self._train_step / future_warmup)
+        else:
+            future_ramp = 1.0
+
+        def horizon_weight(h: int) -> Tensor:
+            w = step_decay ** max(0, h - 1)
+            if h > 1:
+                w *= future_ramp
+            return torch.tensor(float(w), device=self._device)
 
         def bbox_for_model(bbox_h: Tensor, image_h: int, image_w: int) -> Tensor:
             return bbox_xyxy_to_model_space(
@@ -1072,6 +1113,10 @@ class DeepAIFAgent:
         state_roll = type(target_posts[context])(
             *[x.detach() for x in target_posts[context]]
         )
+        h1_anchor_loss = torch.zeros((), device=self._device)
+        h1_anchor_stoch_loss = torch.zeros((), device=self._device)
+        h1_anchor_deter_loss = torch.zeros((), device=self._device)
+        h1_anchor_decode_loss = torch.zeros((), device=self._device)
         with torch.amp.autocast(
             "cuda", enabled=self._use_amp, dtype=self._amp_dtype,
         ):
@@ -1090,6 +1135,8 @@ class DeepAIFAgent:
 
             for h in range(1, horizon_eff + 1):
                 idx = context + h
+                weight_h = horizon_weight(h)
+                total_h_weight = total_h_weight + weight_h
                 act_h = actions[:, idx].to(self._device)
                 state_roll = wm.rssm.img_step(state_roll, act_h)
 
@@ -1102,26 +1149,63 @@ class DeepAIFAgent:
                     target_std,
                     free_nats=free_nats,
                 )
-                kl_raw_sum = kl_raw_sum + kl_raw
-                kl_clamped_sum = kl_clamped_sum + kl_clamped
+                kl_raw_sum = kl_raw_sum + weight_h * kl_raw
+                kl_clamped_sum = kl_clamped_sum + weight_h * kl_clamped
                 deter_sq = (state_roll.deter - target_posts[idx].deter.detach()).pow(2)
                 plain_deter = deter_sq.mean()
                 deter_h = plain_deter
+                stoch_mean_h = self._stoch_mean_alignment_loss(
+                    state_roll, target_posts[idx],
+                )
+                per_horizon_info[f"kl_raw_h{h}"] = kl_raw.detach()
+                per_horizon_info[f"stoch_mean_loss_h{h}"] = stoch_mean_h.detach()
                 if lambda_stoch_mean > 0.0:
-                    stoch_mean_sum = stoch_mean_sum + self._stoch_mean_alignment_loss(
-                        state_roll, target_posts[idx],
-                    )
+                    stoch_mean_sum = stoch_mean_sum + weight_h * stoch_mean_h
+
+                target_img_step = wm.preprocess_image(images[:, idx].to(self._device))
                 if lambda_stoch_decode > 0.0:
                     hybrid_state = self._hybrid_prior_stoch_state(
                         target_posts[idx], state_roll,
                     )
                     hybrid_img = wm.decode_obs(hybrid_state)
-                    target_img_step = wm.preprocess_image(
-                        images[:, idx].to(self._device)
-                    )
-                    stoch_decode_sum = stoch_decode_sum + (
+                    stoch_decode_h = (
                         hybrid_img - target_img_step
                     ).pow(2).mean()
+                    stoch_decode_sum = stoch_decode_sum + weight_h * stoch_decode_h
+                else:
+                    with torch.no_grad():
+                        hybrid_state = self._hybrid_prior_stoch_state(
+                            target_posts[idx], state_roll,
+                        )
+                        hybrid_img = wm.decode_obs(hybrid_state)
+                        stoch_decode_h = (
+                            hybrid_img - target_img_step
+                        ).pow(2).mean()
+                per_horizon_info[f"stoch_decode_loss_h{h}"] = stoch_decode_h.detach()
+
+                if h == 1 and h1_anchor_weight > 0.0:
+                    anchor_wm = self.h1_anchor_world_model
+                    assert anchor_wm is not None
+                    with torch.no_grad():
+                        anchor_prev = self._detach_state(target_posts[context])
+                        anchor_h1 = anchor_wm.rssm.img_step(anchor_prev, act_h)
+                        anchor_h1 = self._detach_state(anchor_h1)
+                        anchor_img = anchor_wm.decode_obs(self._det_state(anchor_h1))
+                    h1_anchor_stoch_loss = self._stoch_mean_alignment_loss(
+                        state_roll, anchor_h1,
+                    )
+                    h1_anchor_deter_loss = nn.functional.mse_loss(
+                        state_roll.deter, anchor_h1.deter.detach(),
+                    )
+                    current_anchor_img = wm.decode_obs(self._det_state(state_roll))
+                    h1_anchor_decode_loss = nn.functional.mse_loss(
+                        current_anchor_img, anchor_img.detach(),
+                    )
+                    h1_anchor_loss = (
+                        h1_anchor_stoch_weight * h1_anchor_stoch_loss
+                        + h1_anchor_deter_weight * h1_anchor_deter_loss
+                        + h1_anchor_decode_weight * h1_anchor_decode_loss
+                    )
 
                 if (
                     obstacle_bbox is not None
@@ -1150,19 +1234,22 @@ class DeepAIFAgent:
                         ).sum() / tok_count
                         if bbox_deter_weight > 0.0:
                             deter_h = plain_deter + bbox_deter_weight * bbox_deter
-                        bbox_deter_sum = bbox_deter_sum + bbox_deter.detach()
+                        bbox_deter_sum = bbox_deter_sum + weight_h * bbox_deter.detach()
+                        total_bbox_deter_weight = total_bbox_deter_weight + weight_h
                         bbox_deter_count += 1
                         if h in decode_horizons:
                             bbox_deter_valid_sum = (
-                                bbox_deter_valid_sum + bbox_deter.detach()
+                                bbox_deter_valid_sum + weight_h * bbox_deter.detach()
                             )
                             bbox_deter_valid_count += 1
                             bbox_token_count_valid_sum = (
                                 bbox_token_count_valid_sum + tok_count.detach()
                             )
-                deter_sum = deter_sum + deter_h
+                per_horizon_info[f"deter_loss_h{h}"] = deter_h.detach()
+                deter_sum = deter_sum + weight_h * deter_h
 
                 if h in decode_horizons:
+                    total_pix_weight = total_pix_weight + weight_h
                     # Decoder parameters are frozen, but this forward must keep
                     # gradients to the rollout latent/RSSM prior.
                     decode_state = (
@@ -1170,13 +1257,15 @@ class DeepAIFAgent:
                         if decode_deterministic else state_roll
                     )
                     recon_h = wm.decode_obs(decode_state)
-                    target_img = wm.preprocess_image(images[:, idx].to(self._device))
+                    target_img = target_img_step
                     gt_future_imgs.append(target_img.detach())
                     rollout_future_imgs.append(recon_h.detach())
                     pix_err = (recon_h - target_img).pow(2)
                     plain_mse = pix_err.mean()
+                    per_horizon_info[f"rollout_pix_mse_h{h}"] = plain_mse.detach()
+                    per_horizon_info[f"rollout_plain_pix_mse_h{h}"] = plain_mse.detach()
                     pix_h = plain_mse
-                    plain_pix_sum = plain_pix_sum + plain_mse.detach()
+                    plain_pix_sum = plain_pix_sum + weight_h * plain_mse.detach()
                     if obstacle_bbox is not None:
                         _, _, img_h, img_w = pix_err.shape
                         bbox_h = bbox_for_model(obstacle_bbox[:, idx], img_h, img_w)
@@ -1202,7 +1291,8 @@ class DeepAIFAgent:
                         denom = mask_h.sum() * pix_err.shape[1]
                         if denom > 0:
                             bbox_mse = (pix_err * mask_h).sum() / denom
-                            bbox_pix_sum = bbox_pix_sum + bbox_mse.detach()
+                            bbox_pix_sum = bbox_pix_sum + weight_h * bbox_mse.detach()
+                            total_bbox_pix_weight = total_bbox_pix_weight + weight_h
                             bbox_pix_count += 1
                             if bbox_pix_weight > 0.0 and bbox_weight_mode == "weighted_mean":
                                 weights = 1.0 + bbox_pix_weight * mask_h
@@ -1211,17 +1301,24 @@ class DeepAIFAgent:
                                 )
                             elif bbox_pix_weight > 0.0:
                                 pix_h = plain_mse + bbox_pix_weight * bbox_mse
-                    pix_sum = pix_sum + pix_h
+                    pix_sum = pix_sum + weight_h * pix_h
                     n_pix += 1
 
-            kl_raw_mean = kl_raw_sum / horizon_eff
-            kl_clamped_mean = kl_clamped_sum / horizon_eff
-            deter_loss = deter_sum / horizon_eff
-            stoch_mean_loss = stoch_mean_sum / horizon_eff
-            stoch_decode_loss = stoch_decode_sum / horizon_eff
-            rollout_pix_mse = pix_sum / max(1, n_pix)
-            rollout_plain_pix_mse = plain_pix_sum / max(1, n_pix)
-            rollout_bbox_mse = bbox_pix_sum / max(1, bbox_pix_count)
+                if detach_between_steps and h < horizon_eff:
+                    state_roll = self._detach_state(state_roll)
+
+            h_denom = total_h_weight.clamp_min(1e-8)
+            pix_denom = total_pix_weight.clamp_min(1e-8)
+            bbox_pix_denom = total_bbox_pix_weight.clamp_min(1e-8)
+            bbox_deter_denom = total_bbox_deter_weight.clamp_min(1e-8)
+            kl_raw_mean = kl_raw_sum / h_denom
+            kl_clamped_mean = kl_clamped_sum / h_denom
+            deter_loss = deter_sum / h_denom
+            stoch_mean_loss = stoch_mean_sum / h_denom
+            stoch_decode_loss = stoch_decode_sum / h_denom
+            rollout_pix_mse = pix_sum / pix_denom
+            rollout_plain_pix_mse = plain_pix_sum / pix_denom
+            rollout_bbox_mse = bbox_pix_sum / bbox_pix_denom
             bbox_valid_frac = torch.tensor(
                 (bbox_valid_count / bbox_total_count) if bbox_total_count > 0 else 0.0,
                 device=self._device,
@@ -1233,7 +1330,7 @@ class DeepAIFAgent:
                 float(bbox_total_count), device=self._device,
             )
             bbox_valid_frac_raw = bbox_valid_frac
-            bbox_deter_loss = bbox_deter_sum / max(1, bbox_deter_count)
+            bbox_deter_loss = bbox_deter_sum / bbox_deter_denom
             bbox_token_count = bbox_token_count_sum / max(1, horizon_eff)
             obstacle_valid_count_t = torch.tensor(
                 float(obstacle_valid_count), device=self._device,
@@ -1248,7 +1345,7 @@ class DeepAIFAgent:
                 bbox_plain_valid_sum / max(1, bbox_plain_valid_count)
             )
             bbox_deter_loss_valid_only = (
-                bbox_deter_valid_sum / max(1, bbox_deter_valid_count)
+                bbox_deter_valid_sum / bbox_deter_denom
             )
             bbox_token_count_valid_only = (
                 bbox_token_count_valid_sum / max(1, bbox_deter_valid_count)
@@ -1300,6 +1397,7 @@ class DeepAIFAgent:
                 + anchor_weight * posterior_anchor_loss
                 + lambda_stoch_mean * stoch_mean_loss
                 + lambda_stoch_decode * stoch_decode_loss
+                + h1_anchor_weight * h1_anchor_loss
             )
 
         with torch.no_grad():
@@ -1428,7 +1526,7 @@ class DeepAIFAgent:
             )
 
         zero = torch.zeros((), device=self._device)
-        return loss, {
+        info = {
             "kl_raw": kl_raw_mean,
             "kl_clamped": kl_clamped_mean,
             "kl_dyn": kl_clamped_mean,
@@ -1474,7 +1572,22 @@ class DeepAIFAgent:
             "stoch_decode_loss": stoch_decode_loss,
             "lambda_stoch_mean": torch.tensor(lambda_stoch_mean, device=self._device),
             "lambda_stoch_decode": torch.tensor(lambda_stoch_decode, device=self._device),
+            "target_rollout_step_decay": torch.tensor(step_decay, device=self._device),
+            "target_rollout_future_ramp": torch.tensor(future_ramp, device=self._device),
+            "h1_weight": horizon_weight(1),
+            "h2_weight": horizon_weight(2) if horizon_eff >= 2 else zero,
+            "total_horizon_weight": total_h_weight,
+            "total_pixel_weight": total_pix_weight,
+            "target_rollout_detach_between_steps": torch.tensor(
+                1.0 if detach_between_steps else 0.0, device=self._device,
+            ),
+            "h1_anchor_loss": h1_anchor_loss,
+            "h1_anchor_stoch_loss": h1_anchor_stoch_loss,
+            "h1_anchor_deter_loss": h1_anchor_deter_loss,
+            "h1_anchor_decode_loss": h1_anchor_decode_loss,
         }
+        info.update(per_horizon_info)
+        return loss, info
 
     def update_transition_target_rollout(
         self,
@@ -1733,6 +1846,17 @@ class DeepAIFAgent:
             "stoch_decode_loss": zero,
             "lambda_stoch_mean": zero,
             "lambda_stoch_decode": zero,
+            "target_rollout_step_decay": zero,
+            "target_rollout_future_ramp": zero,
+            "h1_weight": zero,
+            "h2_weight": zero,
+            "total_horizon_weight": zero,
+            "total_pixel_weight": zero,
+            "target_rollout_detach_between_steps": zero,
+            "h1_anchor_loss": zero,
+            "h1_anchor_stoch_loss": zero,
+            "h1_anchor_deter_loss": zero,
+            "h1_anchor_decode_loss": zero,
         }
 
     def update_transition_dense_one_step(
@@ -1799,6 +1923,10 @@ class DeepAIFAgent:
             mean=prior.mean,
             std=prior.std,
         )
+
+    @staticmethod
+    def _detach_state(state):
+        return type(state)(*[x.detach() for x in state])
 
     @staticmethod
     def _det_state(post):
@@ -2027,6 +2155,17 @@ class DeepAIFAgent:
             p.requires_grad = False
         self.target_world_model = target
         print(f"  Loaded frozen target_world_model from {path}")
+
+    def set_h1_anchor_world_model_from_checkpoint(self, path: str | Path):
+        """Create a frozen H1 anchor world model from a checkpoint."""
+        ckpt = torch.load(path, map_location=self._device, weights_only=False)
+        anchor = WorldModel(self._cfg).to(self._device)
+        anchor.load_state_dict(ckpt["world_model"])
+        anchor.eval()
+        for p in anchor.parameters():
+            p.requires_grad = False
+        self.h1_anchor_world_model = anchor
+        print(f"  Loaded frozen h1_anchor_world_model from {path}")
 
     def load_checkpoint(self, path: str | Path):
         ckpt = torch.load(path, map_location=self._device, weights_only=False)

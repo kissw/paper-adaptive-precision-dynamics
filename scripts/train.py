@@ -520,6 +520,17 @@ def evaluate_world_model(
             "stoch_decode_loss": 0.0,
             "lambda_stoch_mean": 0.0,
             "lambda_stoch_decode": 0.0,
+            "target_rollout_step_decay": 0.0,
+            "target_rollout_future_ramp": 0.0,
+            "h1_weight": 0.0,
+            "h2_weight": 0.0,
+            "total_horizon_weight": 0.0,
+            "total_pixel_weight": 0.0,
+            "target_rollout_detach_between_steps": 0.0,
+            "h1_anchor_loss": 0.0,
+            "h1_anchor_stoch_loss": 0.0,
+            "h1_anchor_deter_loss": 0.0,
+            "h1_anchor_decode_loss": 0.0,
         }
         n_batches = 0
         for batch in tqdm(dataloader, desc=f"Validation({mode})", leave=False):
@@ -533,8 +544,8 @@ def evaluate_world_model(
                     images, states, actions, obstacle_bbox=obstacle_bbox,
                 )
             n_batches += 1
-            for k in totals:
-                totals[k] += float(info.get(k, 0.0))
+            for k, v in info.items():
+                totals[k] = totals.get(k, 0.0) + float(v)
         if was_training:
             wm.train()
         if n_batches == 0:
@@ -816,6 +827,14 @@ def main():
     parser.add_argument("--device", default=None)
     parser.add_argument("--output_dir", default="outputs/train")
     parser.add_argument("--resume", default=None, help="Checkpoint path to resume from")
+    parser.add_argument(
+        "--weights_from",
+        default=None,
+        help=(
+            "Transition warm-start checkpoint for world_model weights only. "
+            "Does not load optimizer state; mutually exclusive with --resume."
+        ),
+    )
     parser.add_argument("--start_epoch", type=int, default=0, help="Starting epoch number")
 
     parser.add_argument(
@@ -923,6 +942,10 @@ def main():
         raise ValueError("--early_stop_min_delta must be >= 0")
     if args.diag_num_samples < 1:
         raise ValueError("--diag_num_samples must be >= 1")
+    if args.resume is not None and args.weights_from is not None:
+        raise ValueError("--resume and --weights_from are mutually exclusive")
+    if args.weights_from is not None and args.stage != "transition":
+        raise ValueError("--weights_from is only supported with --stage transition")
 
     cfg = Config.from_yaml(args.config, overrides=args.set or None)
     if args.epochs:
@@ -1003,7 +1026,18 @@ def main():
 
     # Stage-2 (transition): warm-start the full world model from stage-1 AE.
     if args.stage == "transition" and not args.resume:
-        if args.init_from is None:
+        if args.weights_from is not None:
+            agent.load_world_model_weights(args.weights_from)
+            agent.freeze_encoder_decoder()
+            print("Loaded world_model weights from --weights_from with fresh optimizer.")
+            if _uses_transition_target_model(cfg):
+                if args.init_from is None:
+                    raise RuntimeError(
+                        "--weights_from with target-model transition requires --init_from "
+                        "to load the frozen target_world_model."
+                    )
+                agent.set_target_world_model_from_checkpoint(args.init_from)
+        elif args.init_from is None:
             print("WARNING: --stage transition without --init_from; "
                   "world_model will use random init (not recommended).")
         else:
@@ -1012,6 +1046,11 @@ def main():
             agent.freeze_encoder_decoder()  # re-assert eval()/requires_grad after load
             if _uses_transition_target_model(cfg):
                 agent.set_target_world_model_from_checkpoint(args.init_from)
+
+    h1_anchor_ckpt = getattr(cfg.training, "h1_anchor_checkpoint", None)
+    h1_anchor_weight = float(getattr(cfg.training, "h1_anchor_weight", 0.0))
+    if h1_anchor_ckpt is not None and h1_anchor_weight > 0.0:
+        agent.set_h1_anchor_world_model_from_checkpoint(h1_anchor_ckpt)
 
     # LR schedule: warmup -> cosine decay over the full run (after any resume,
     # so the scheduler binds to the final optimizer instance).
@@ -1137,8 +1176,15 @@ def main():
                     "deter": f"{info.get('deter_loss', 0.0):.4f}",
                     "stoch": f"{info.get('stoch_mean_loss', 0.0):.4f}",
                     "pix": f"{info.get('rollout_pix_mse', 0.0):.4f}",
+                    "pix_h1": f"{info.get('rollout_pix_mse_h1', 0.0):.4f}",
+                    "pix_h2": f"{info.get('rollout_pix_mse_h2', 0.0):.4f}",
+                    "st_h1": f"{info.get('stoch_mean_loss_h1', 0.0):.4f}",
+                    "st_h2": f"{info.get('stoch_mean_loss_h2', 0.0):.4f}",
                     "bbox_pix": f"{info.get('rollout_bbox_mse', 0.0):.4f}",
                     "pix_w": f"{info.get('lambda_pix_eff', 0.0):.2f}",
+                    "h2_w": f"{info.get('h2_weight', 0.0):.2f}",
+                    "det": f"{info.get('target_rollout_detach_between_steps', 0.0):.0f}",
+                    "h1a": f"{info.get('h1_anchor_loss', 0.0):.4f}",
                     "rr": f"{info.get('rollout_recon', 0.0):.4f}",
                     "cyc": f"{info.get('cycle', 0.0):.2f}",
                 })
@@ -1156,6 +1202,12 @@ def main():
                     f"stoch={info.get('stoch_mean_loss', 0.0):.4f} "
                     f"stoch_dec={info.get('stoch_decode_loss', 0.0):.4f} "
                     f"pix={info.get('rollout_pix_mse', 0.0):.4f} "
+                    f"pix_h1={info.get('rollout_pix_mse_h1', 0.0):.4f} "
+                    f"pix_h2={info.get('rollout_pix_mse_h2', 0.0):.4f} "
+                    f"stoch_h1={info.get('stoch_mean_loss_h1', 0.0):.4f} "
+                    f"stoch_h2={info.get('stoch_mean_loss_h2', 0.0):.4f} "
+                    f"stoch_dec_h1={info.get('stoch_decode_loss_h1', 0.0):.4f} "
+                    f"stoch_dec_h2={info.get('stoch_decode_loss_h2', 0.0):.4f} "
                     f"bbox_pix={info.get('rollout_bbox_mse', 0.0):.4f} "
                     f"plain_pix={info.get('rollout_plain_pix_mse', 0.0):.4f} "
                     f"bbox_deter={info.get('bbox_deter_loss', 0.0):.4f} "
@@ -1163,6 +1215,11 @@ def main():
                     f"bbox_tok={info.get('bbox_token_count', 0.0):.1f} "
                     f"obs_valid={info.get('obstacle_valid_frac', 0.0):.3f} "
                     f"pix_w={info.get('lambda_pix_eff', 0.0):.3f} "
+                    f"future_ramp={info.get('target_rollout_future_ramp', 0.0):.3f} "
+                    f"h1_w={info.get('h1_weight', 0.0):.3f} "
+                    f"h2_w={info.get('h2_weight', 0.0):.3f} "
+                    f"detach_steps={info.get('target_rollout_detach_between_steps', 0.0):.0f} "
+                    f"h1_anchor={info.get('h1_anchor_loss', 0.0):.4f} "
                     f"anchor={info.get('posterior_anchor_loss', 0.0):.4f} "
                     f"rr={info.get('rollout_recon', 0.0):.4f} "
                     f"rr_w={info.get('eff_rr_weight', 0.0):.3f} "
@@ -1202,6 +1259,12 @@ def main():
                 f"stoch_dec={val_info.get('stoch_decode_loss', 0.0):.4f} "
                 f"kl_rep={val_info['kl_rep']:.4f} "
                 f"pix={val_info.get('rollout_pix_mse', 0.0):.4f} "
+                f"pix_h1={val_info.get('rollout_pix_mse_h1', 0.0):.4f} "
+                f"pix_h2={val_info.get('rollout_pix_mse_h2', 0.0):.4f} "
+                f"stoch_h1={val_info.get('stoch_mean_loss_h1', 0.0):.4f} "
+                f"stoch_h2={val_info.get('stoch_mean_loss_h2', 0.0):.4f} "
+                f"stoch_dec_h1={val_info.get('stoch_decode_loss_h1', 0.0):.4f} "
+                f"stoch_dec_h2={val_info.get('stoch_decode_loss_h2', 0.0):.4f} "
                 f"bbox_pix={val_info.get('rollout_bbox_mse', 0.0):.4f} "
                 f"plain_pix={val_info.get('rollout_plain_pix_mse', 0.0):.4f} "
                 f"bbox_deter={val_info.get('bbox_deter_loss', 0.0):.4f} "
@@ -1221,6 +1284,17 @@ def main():
                 f"var_ratio={val_info.get('rollout_var_ratio', 0.0):.3f} "
                 f"act_lr={val_info.get('action_sensitivity_left_right_mse', 0.0):.4f} "
                 f"pix_w={val_info.get('lambda_pix_eff', 0.0):.3f} "
+                f"step_decay={val_info.get('target_rollout_step_decay', 0.0):.3f} "
+                f"future_ramp={val_info.get('target_rollout_future_ramp', 0.0):.3f} "
+                f"h1_w={val_info.get('h1_weight', 0.0):.3f} "
+                f"h2_w={val_info.get('h2_weight', 0.0):.3f} "
+                f"h_w_sum={val_info.get('total_horizon_weight', 0.0):.3f} "
+                f"pix_w_sum={val_info.get('total_pixel_weight', 0.0):.3f} "
+                f"detach_steps={val_info.get('target_rollout_detach_between_steps', 0.0):.0f} "
+                f"h1_anchor={val_info.get('h1_anchor_loss', 0.0):.4f} "
+                f"h1_anchor_stoch={val_info.get('h1_anchor_stoch_loss', 0.0):.4f} "
+                f"h1_anchor_deter={val_info.get('h1_anchor_deter_loss', 0.0):.4f} "
+                f"h1_anchor_decode={val_info.get('h1_anchor_decode_loss', 0.0):.4f} "
                 f"anchor={val_info.get('posterior_anchor_loss', 0.0):.4f} "
                 f"target_img={val_info.get('target_img_loss', 0.0):.4f} "
                 f"online_img={val_info.get('online_img_loss', 0.0):.4f} "
