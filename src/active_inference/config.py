@@ -75,6 +75,11 @@ class TrainingConfig:
     h1_anchor_stoch_weight: float = 1.0
     h1_anchor_deter_weight: float = 1.0
     h1_anchor_decode_weight: float = 1.0
+    prior_state_denoise_weight: float = 0.0
+    prior_state_denoise_stoch_weight: float = 1.0
+    prior_state_denoise_deter_weight: float = 1.0
+    prior_state_denoise_decode_weight: float = 1.0
+    prior_state_denoise_start_horizon: int = 1
     free_nats_transition: float | None = None
     transition_use_raw_kl_loss: bool = True
     posterior_anchor_weight: float = 0.0

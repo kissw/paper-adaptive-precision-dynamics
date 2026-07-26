@@ -531,6 +531,10 @@ def evaluate_world_model(
             "h1_anchor_stoch_loss": 0.0,
             "h1_anchor_deter_loss": 0.0,
             "h1_anchor_decode_loss": 0.0,
+            "prior_state_denoise_loss": 0.0,
+            "prior_state_denoise_stoch_loss": 0.0,
+            "prior_state_denoise_deter_loss": 0.0,
+            "prior_state_denoise_decode_loss": 0.0,
         }
         n_batches = 0
         for batch in tqdm(dataloader, desc=f"Validation({mode})", leave=False):
@@ -1185,6 +1189,7 @@ def main():
                     "h2_w": f"{info.get('h2_weight', 0.0):.2f}",
                     "det": f"{info.get('target_rollout_detach_between_steps', 0.0):.0f}",
                     "h1a": f"{info.get('h1_anchor_loss', 0.0):.4f}",
+                    "den": f"{info.get('prior_state_denoise_loss', 0.0):.4f}",
                     "rr": f"{info.get('rollout_recon', 0.0):.4f}",
                     "cyc": f"{info.get('cycle', 0.0):.2f}",
                 })
@@ -1220,6 +1225,7 @@ def main():
                     f"h2_w={info.get('h2_weight', 0.0):.3f} "
                     f"detach_steps={info.get('target_rollout_detach_between_steps', 0.0):.0f} "
                     f"h1_anchor={info.get('h1_anchor_loss', 0.0):.4f} "
+                    f"denoise={info.get('prior_state_denoise_loss', 0.0):.4f} "
                     f"anchor={info.get('posterior_anchor_loss', 0.0):.4f} "
                     f"rr={info.get('rollout_recon', 0.0):.4f} "
                     f"rr_w={info.get('eff_rr_weight', 0.0):.3f} "
@@ -1295,6 +1301,10 @@ def main():
                 f"h1_anchor_stoch={val_info.get('h1_anchor_stoch_loss', 0.0):.4f} "
                 f"h1_anchor_deter={val_info.get('h1_anchor_deter_loss', 0.0):.4f} "
                 f"h1_anchor_decode={val_info.get('h1_anchor_decode_loss', 0.0):.4f} "
+                f"denoise={val_info.get('prior_state_denoise_loss', 0.0):.4f} "
+                f"denoise_stoch={val_info.get('prior_state_denoise_stoch_loss', 0.0):.4f} "
+                f"denoise_deter={val_info.get('prior_state_denoise_deter_loss', 0.0):.4f} "
+                f"denoise_decode={val_info.get('prior_state_denoise_decode_loss', 0.0):.4f} "
                 f"anchor={val_info.get('posterior_anchor_loss', 0.0):.4f} "
                 f"target_img={val_info.get('target_img_loss', 0.0):.4f} "
                 f"online_img={val_info.get('online_img_loss', 0.0):.4f} "

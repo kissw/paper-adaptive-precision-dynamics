@@ -983,6 +983,10 @@ class DeepAIFAgent:
                 "h1_anchor_stoch_loss": zero,
                 "h1_anchor_deter_loss": zero,
                 "h1_anchor_decode_loss": zero,
+                "prior_state_denoise_loss": zero,
+                "prior_state_denoise_stoch_loss": zero,
+                "prior_state_denoise_deter_loss": zero,
+                "prior_state_denoise_decode_loss": zero,
             }
         horizon_eff = min(horizon, T - 1 - context)
 
@@ -1083,6 +1087,19 @@ class DeepAIFAgent:
         h1_anchor_stoch_weight = float(getattr(cfg, "h1_anchor_stoch_weight", 1.0))
         h1_anchor_deter_weight = float(getattr(cfg, "h1_anchor_deter_weight", 1.0))
         h1_anchor_decode_weight = float(getattr(cfg, "h1_anchor_decode_weight", 1.0))
+        denoise_weight = float(getattr(cfg, "prior_state_denoise_weight", 0.0))
+        denoise_stoch_weight = float(
+            getattr(cfg, "prior_state_denoise_stoch_weight", 1.0)
+        )
+        denoise_deter_weight = float(
+            getattr(cfg, "prior_state_denoise_deter_weight", 1.0)
+        )
+        denoise_decode_weight = float(
+            getattr(cfg, "prior_state_denoise_decode_weight", 1.0)
+        )
+        denoise_start_h = max(
+            1, int(getattr(cfg, "prior_state_denoise_start_horizon", 1))
+        )
         if h1_anchor_weight > 0.0 and self.h1_anchor_world_model is None:
             raise RuntimeError(
                 "training.h1_anchor_weight > 0 requires h1_anchor_world_model. "
@@ -1117,6 +1134,10 @@ class DeepAIFAgent:
         h1_anchor_stoch_loss = torch.zeros((), device=self._device)
         h1_anchor_deter_loss = torch.zeros((), device=self._device)
         h1_anchor_decode_loss = torch.zeros((), device=self._device)
+        prior_state_denoise_loss = torch.zeros((), device=self._device)
+        prior_state_denoise_stoch_loss = torch.zeros((), device=self._device)
+        prior_state_denoise_deter_loss = torch.zeros((), device=self._device)
+        prior_state_denoise_decode_loss = torch.zeros((), device=self._device)
         with torch.amp.autocast(
             "cuda", enabled=self._use_amp, dtype=self._amp_dtype,
         ):
@@ -1307,6 +1328,42 @@ class DeepAIFAgent:
                 if detach_between_steps and h < horizon_eff:
                     state_roll = self._detach_state(state_roll)
 
+            if denoise_weight > 0.0 and horizon_eff >= denoise_start_h + 1:
+                denoise_state = type(target_posts[context])(
+                    *[x.detach() for x in target_posts[context]]
+                )
+                for dh in range(1, denoise_start_h + 1):
+                    denoise_idx = context + dh
+                    denoise_state = wm.rssm.img_step(
+                        denoise_state, actions[:, denoise_idx].to(self._device)
+                    )
+                denoise_input = self._detach_state(self._det_state(denoise_state))
+                denoise_target_h = denoise_start_h + 1
+                denoise_target_idx = context + denoise_target_h
+                denoise_prior = wm.rssm.img_step(
+                    denoise_input,
+                    actions[:, denoise_target_idx].to(self._device),
+                )
+                denoise_target = target_posts[denoise_target_idx]
+                prior_state_denoise_stoch_loss = self._stoch_mean_alignment_loss(
+                    denoise_prior, denoise_target,
+                )
+                prior_state_denoise_deter_loss = nn.functional.mse_loss(
+                    denoise_prior.deter, denoise_target.deter.detach(),
+                )
+                denoise_img = wm.decode_obs(self._det_state(denoise_prior))
+                denoise_target_img = wm.preprocess_image(
+                    images[:, denoise_target_idx].to(self._device)
+                )
+                prior_state_denoise_decode_loss = nn.functional.mse_loss(
+                    denoise_img, denoise_target_img,
+                )
+                prior_state_denoise_loss = (
+                    denoise_stoch_weight * prior_state_denoise_stoch_loss
+                    + denoise_deter_weight * prior_state_denoise_deter_loss
+                    + denoise_decode_weight * prior_state_denoise_decode_loss
+                )
+
             h_denom = total_h_weight.clamp_min(1e-8)
             pix_denom = total_pix_weight.clamp_min(1e-8)
             bbox_pix_denom = total_bbox_pix_weight.clamp_min(1e-8)
@@ -1398,6 +1455,7 @@ class DeepAIFAgent:
                 + lambda_stoch_mean * stoch_mean_loss
                 + lambda_stoch_decode * stoch_decode_loss
                 + h1_anchor_weight * h1_anchor_loss
+                + denoise_weight * prior_state_denoise_loss
             )
 
         with torch.no_grad():
@@ -1585,6 +1643,10 @@ class DeepAIFAgent:
             "h1_anchor_stoch_loss": h1_anchor_stoch_loss,
             "h1_anchor_deter_loss": h1_anchor_deter_loss,
             "h1_anchor_decode_loss": h1_anchor_decode_loss,
+            "prior_state_denoise_loss": prior_state_denoise_loss,
+            "prior_state_denoise_stoch_loss": prior_state_denoise_stoch_loss,
+            "prior_state_denoise_deter_loss": prior_state_denoise_deter_loss,
+            "prior_state_denoise_decode_loss": prior_state_denoise_decode_loss,
         }
         info.update(per_horizon_info)
         return loss, info
@@ -1857,6 +1919,10 @@ class DeepAIFAgent:
             "h1_anchor_stoch_loss": zero,
             "h1_anchor_deter_loss": zero,
             "h1_anchor_decode_loss": zero,
+            "prior_state_denoise_loss": zero,
+            "prior_state_denoise_stoch_loss": zero,
+            "prior_state_denoise_deter_loss": zero,
+            "prior_state_denoise_decode_loss": zero,
         }
 
     def update_transition_dense_one_step(

@@ -132,6 +132,11 @@ training:
   h1_anchor_stoch_weight: 1.0
   h1_anchor_deter_weight: 1.0
   h1_anchor_decode_weight: 1.0
+  prior_state_denoise_weight: 0.0
+  prior_state_denoise_stoch_weight: 1.0
+  prior_state_denoise_deter_weight: 1.0
+  prior_state_denoise_decode_weight: 1.0
+  prior_state_denoise_start_horizon: 1
   free_nats_transition: 0.5
   transition_use_raw_kl_loss: true
   posterior_anchor_weight: 0.0
